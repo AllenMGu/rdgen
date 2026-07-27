@@ -13,6 +13,16 @@ on:
         required: true
         default: ''
         type: string
+      source_repository:
+        description: 'RustDesk source repository (owner/name)'
+        required: true
+        default: 'rustdesk/rustdesk'
+        type: string
+      source_ref:
+        description: 'RustDesk source branch, tag, or commit'
+        required: true
+        default: 'master'
+        type: string
 
 
 env:
@@ -50,6 +60,8 @@ jobs:
     uses: ./.github/workflows/bridge.yml
     with:
       version: ${{ inputs.version }}
+      source_repository: ${{ inputs.source_repository }}
+      source_ref: ${{ inputs.source_ref }}
 
   build-rustdesk-android:
     needs: [generate-bridge-linux, setup]
@@ -100,7 +112,7 @@ jobs:
         with:
           url: "${{ secrets.GENURL }}/cleanzip"
           method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
+          customHeaders: '{"Content-Type": "application/json", "Authorization": "Bearer ${{ env.upload_token }}"}'
           data: '{"uuid": "${{ env.uuid }}"}'
 
       - name: Free Disk Space (Ubuntu)
@@ -174,18 +186,10 @@ jobs:
           sudo apt-get install -y potrace
 
       - name: Checkout source code
-        if: ${{ env.VERSION != 'master' }}
         uses: actions/checkout@v4
         with:
-          repository: rustdesk/rustdesk
-          ref: refs/tags/${{ env.VERSION }}
-          submodules: recursive
-       
-      - name: Checkout source code
-        if: ${{ env.VERSION == 'master' }}
-        uses: actions/checkout@v4
-        with:
-          repository: rustdesk/rustdesk
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ inputs.source_ref }}
           submodules: recursive
 
       - name: Install flutter
@@ -568,7 +572,7 @@ jobs:
           max_attempts: 3
           shell: bash
           command: |
-            curl -i -X POST -H "Content-Type: multipart/form-data" -H "Authorization: Bearer ${{ env.token }}" -F "file=@./signed-apk/${{ env.filename }}-${{ matrix.job.arch }}.apk" -F "uuid=${{ env.uuid }}" ${{ secrets.GENURL }}/save_custom_client
+            curl --fail-with-body --show-error --silent -X POST -H "Content-Type: multipart/form-data" -H "Authorization: Bearer ${{ env.upload_token }}" -F "file=@./signed-apk/${{ env.filename }}-${{ matrix.job.arch }}.apk" -F "uuid=${{ env.uuid }}" ${{ secrets.GENURL }}/save_custom_client
 
       - name: send file to api server
         if: ${{ env.rdgen == 'false' }}
@@ -603,7 +607,7 @@ jobs:
         with:
           url: "${{ secrets.GENURL }}/cleanzip"
           method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
+          customHeaders: '{"Content-Type": "application/json", "Authorization": "Bearer ${{ env.upload_token }}"}'
           data: '{"uuid": "${{ env.uuid }}"}'
 
       - name: Set rdgen value

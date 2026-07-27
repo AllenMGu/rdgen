@@ -13,6 +13,16 @@ on:
         required: true
         default: ''
         type: string
+      source_repository:
+        description: 'RustDesk source repository (owner/name)'
+        required: true
+        default: 'rustdesk/rustdesk'
+        type: string
+      source_ref:
+        description: 'RustDesk source branch, tag, or commit'
+        required: true
+        default: 'master'
+        type: string
 
 
 env:
@@ -51,6 +61,8 @@ jobs:
     uses: ./.github/workflows/bridge.yml
     with:
       version: ${{ inputs.version }}
+      source_repository: ${{ inputs.source_repository }}
+      source_ref: ${{ inputs.source_ref }}
 
   build-RustDeskTempTopMostWindow:
     needs: setup
@@ -102,7 +114,7 @@ jobs:
         with:
           url: "${{ secrets.GENURL }}/cleanzip"
           method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
+          customHeaders: '{"Content-Type": "application/json", "Authorization": "Bearer ${{ env.upload_token }}"}'
           data: '{"uuid": "${{ env.uuid }}"}'
 
       - name: Export GitHub Actions cache environment variables
@@ -123,18 +135,10 @@ jobs:
           echo "STATUS_URL=${{ env.apiServer }}/api/updategh" >> $env:GITHUB_ENV
 
       - name: Checkout source code
-        if: ${{ env.VERSION != 'master' }}
         uses: actions/checkout@v4
         with:
-          repository: rustdesk/rustdesk
-          ref: refs/tags/${{ env.VERSION }}
-          submodules: recursive
-
-      - name: Checkout source code
-        if: ${{ env.VERSION == 'master' }}
-        uses: actions/checkout@v4
-        with:
-          repository: rustdesk/rustdesk
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ inputs.source_ref }}
           submodules: recursive
 
       - name: Restore bridge files
@@ -612,8 +616,8 @@ jobs:
           max_attempts: 3
           shell: bash
           command: |
-            curl -i -X POST -H "Content-Type: multipart/form-data" -H "Authorization: Bearer ${{ env.token }}" -F "file=@./SignOutput/${{ env.filename }}.exe" -F "uuid=${{ env.uuid }}" ${{ secrets.GENURL }}/save_custom_client
-            curl -i -X POST -H "Content-Type: multipart/form-data" -H "Authorization: Bearer ${{ env.token }}" -F "file=@./SignOutput/${{ env.filename }}.msi" -F "uuid=${{ env.uuid }}" ${{ secrets.GENURL }}/save_custom_client || true
+            curl --fail-with-body --show-error --silent -X POST -H "Content-Type: multipart/form-data" -H "Authorization: Bearer ${{ env.upload_token }}" -F "file=@./SignOutput/${{ env.filename }}.exe" -F "uuid=${{ env.uuid }}" ${{ secrets.GENURL }}/save_custom_client
+            curl --fail-with-body --show-error --silent -X POST -H "Content-Type: multipart/form-data" -H "Authorization: Bearer ${{ env.upload_token }}" -F "file=@./SignOutput/${{ env.filename }}.msi" -F "uuid=${{ env.uuid }}" ${{ secrets.GENURL }}/save_custom_client || true
 
       - name: send file to api server
         if: ${{ env.rdgen == 'false' }}

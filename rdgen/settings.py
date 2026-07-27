@@ -12,6 +12,8 @@ https://docs.djangoproject.com/en/5.0/ref/settings/
 import os
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -20,15 +22,22 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get('SECRET_KEY','django-insecure-!(t-!f#6g#sr%yfded9(xha)g+=!6craeez^cp+*&bz_7vdk61')
+SECRET_KEY = os.environ.get('SECRET_KEY', '')
+if not SECRET_KEY:
+    raise ImproperlyConfigured("SECRET_KEY must be set")
 GHUSER = os.environ.get("GHUSER", '')
 GHBEARER = os.environ.get("GHBEARER", '')
 GENURL = os.environ.get("GENURL", '')
 GHBRANCH = os.environ.get("GHBRANCH",'master')
-ZIP_PASSWORD = os.environ.get("ZIP_PASSWORD",'insecure')
+ZIP_PASSWORD = os.environ.get("ZIP_PASSWORD", '')
 PROTOCOL = os.environ.get("PROTOCOL", 'https')
 REPONAME = os.environ.get("REPONAME", 'rdgen')
-SH_SECRET = os.environ.get('SH_SECRET', 'secret')
+RUSTDESK_REPOSITORY = os.environ.get("RUSTDESK_REPOSITORY", 'rustdesk/rustdesk')
+RUSTDESK_REF = os.environ.get("RUSTDESK_REF", '')
+RUSTDESK_PUBLIC_KEY_FILE = os.environ.get("RUSTDESK_PUBLIC_KEY_FILE", '')
+UPLOAD_TOKEN = os.environ.get("UPLOAD_TOKEN", '')
+ARTIFACT_ROOT = Path(os.environ.get("ARTIFACT_ROOT", BASE_DIR / 'exe'))
+SH_SECRET = os.environ.get('SH_SECRET', '')
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
@@ -90,7 +99,7 @@ WSGI_APPLICATION = 'rdgen.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': os.environ.get('DATABASE_PATH', BASE_DIR / 'db.sqlite3'),
     }
 }
 

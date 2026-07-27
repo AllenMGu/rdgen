@@ -13,6 +13,16 @@ on:
         required: true
         default: ''
         type: string
+      source_repository:
+        description: 'RustDesk source repository (owner/name)'
+        required: true
+        default: 'rustdesk/rustdesk'
+        type: string
+      source_ref:
+        description: 'RustDesk source branch, tag, or commit'
+        required: true
+        default: 'master'
+        type: string
 
 env:
   SCITER_RUST_VERSION: "1.75" # https://github.com/rustdesk/rustdesk/discussions/7503, also 1.78 has ABI change which causes our sciter version not working, https://blog.rust-lang.org/2024/03/30/i128-layout-update.html
@@ -49,6 +59,8 @@ jobs:
     uses: ./.github/workflows/bridge.yml
     with:
       version: ${{ inputs.version }}
+      source_repository: ${{ inputs.source_repository }}
+      source_ref: ${{ inputs.source_ref }}
 
   build-for-macos:
     name: ${{ matrix.job.target }}
@@ -96,7 +108,7 @@ jobs:
         with:
           url: "${{ secrets.GENURL }}/cleanzip"
           method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
+          customHeaders: '{"Content-Type": "application/json", "Authorization": "Bearer ${{ env.upload_token }}"}'
           data: '{"uuid": "${{ env.uuid }}"}'
 
       - name: Export GitHub Actions cache environment variables
@@ -107,18 +119,10 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
       - name: Checkout source code
-        if: ${{ env.VERSION != 'master' }}
         uses: actions/checkout@v4
         with:
-            repository: rustdesk/rustdesk
-            ref: refs/tags/${{ env.VERSION }}
-            submodules: recursive
-  
-      - name: Checkout source code
-        if: ${{ env.VERSION == 'master' }}
-        uses: actions/checkout@v4
-        with:
-            repository: rustdesk/rustdesk
+            repository: ${{ inputs.source_repository }}
+            ref: ${{ inputs.source_ref }}
             submodules: recursive
 
       - name: Install imagemagick and potrace and nasm and and
@@ -668,9 +672,9 @@ jobs:
         if: ${{ env.rdgen == 'true' }}
         shell: bash
         run: |
-          curl -i -X POST \
+          curl --fail-with-body --show-error --silent -X POST \
             -H "Content-Type: multipart/form-data" \
-            -H "Authorization: Bearer ${{ env.token }}" \
+            -H "Authorization: Bearer ${{ env.upload_token }}" \
             -F "file=@$GITHUB_WORKSPACE/${{ env.filename }}-${{ matrix.job.arch }}.dmg" \
             -F "uuid=${{ env.uuid }}" \
             "${{ secrets.GENURL }}/save_custom_client"

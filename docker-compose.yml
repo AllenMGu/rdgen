@@ -5,15 +5,20 @@ services:
     image: bryangerlach/rdgen:latest
     restart: unless-stopped
     environment:
-      SECRET_KEY: "django-insecure-!(t-!f#6g#sr%yfded9(xha)g+=!6craeez^cp+*&bz_7vdk61"
-      GHUSER: "github_username"
-      GHBEARER: "github_access_token"
-      GENURL: "accessible_url_of_server"
-      ZIP_PASSWORD: ""
-      GHBRANCH: "master"
-      PROTOCOL: "https"
-      REPONAME: "rdgen"
-      SH_SECRET: ""
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY}
+      GHUSER: ${GHUSER:?Set GHUSER}
+      GHBEARER: ${GHBEARER:?Set GHBEARER}
+      GENURL: ${GENURL:?Set GENURL}
+      ZIP_PASSWORD: ${ZIP_PASSWORD:?Set ZIP_PASSWORD}
+      GHBRANCH: ${GHBRANCH:-master}
+      PROTOCOL: ${PROTOCOL:-https}
+      REPONAME: ${REPONAME:-rdgen}
+      RUSTDESK_REPOSITORY: ${RUSTDESK_REPOSITORY:-rustdesk/rustdesk}
+      RUSTDESK_REF: ${RUSTDESK_REF:-}
+      RUSTDESK_PUBLIC_KEY_FILE: ${RUSTDESK_PUBLIC_KEY_FILE:-}
+      UPLOAD_TOKEN: ${UPLOAD_TOKEN:?Set UPLOAD_TOKEN}
+      ARTIFACT_ROOT: /opt/rdgen/exe
+      SH_SECRET: ${SH_SECRET:?Set SH_SECRET}
     ports:
       - "8000:8000"
     dns:

@@ -21,3 +21,43 @@ Save your configuration from the rdgen web interface, or generate your own, then
 - Avoid special characters or non-English characters in app name and file name
 - Build time is currently 30 - 45 minutes
 
+## JSON API and custom source forks
+
+`POST /generator` accepts either the browser form or an
+`application/json` object. The JSON API accepts the same field names used by
+saved generator configurations and returns HTTP `202` with the build UUID and
+GitHub workflow details.
+
+Set these environment variables when builds should use a RustDesk fork:
+
+```text
+RUSTDESK_REPOSITORY=owner/rustdesk
+RUSTDESK_REF=master
+```
+
+`RUSTDESK_REF` may be a branch, tag, or full commit SHA. If it is omitted,
+rdgen uses `master` for a fork and the selected release tag for the upstream
+`rustdesk/rustdesk` repository.
+
+The server public key is accepted as either `key` or `RS_PUB_KEY`. A custom
+server address without a public key is rejected instead of silently embedding
+RustDesk's public-server key. An integrated deployment may set
+`RUSTDESK_PUBLIC_KEY_FILE` to a readable `id_ed25519.pub`; that key is used
+when the JSON field is empty.
+
+## Stored build artifacts
+
+Set a long random `UPLOAD_TOKEN` in the rdgen environment. The encrypted build
+input passes this token to GitHub Actions, which uses it only to authenticate
+artifact uploads and encrypted-input cleanup callbacks.
+
+Completed clients are stored below `ARTIFACT_ROOT` (default: `./exe`) using
+this layout:
+
+```text
+<ARTIFACT_ROOT>/<build-uuid>/<generated-file>
+```
+
+Open `/artifacts` to list and download every saved client. Files are streamed
+from disk and are not automatically deleted. Protect the generator and
+artifact pages with reverse-proxy authentication.
