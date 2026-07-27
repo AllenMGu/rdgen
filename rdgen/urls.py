@@ -20,13 +20,14 @@ from rdgenerator import views as views
 if django.__version__.split('.')[0]>='4':
     from django.urls import re_path as url
 else:
-    from django.conf.urls import  url, include
+    from django.conf.urls import url
 
 urlpatterns = [
     url(r'^$',views.generator_view),
     url(r'^generator',views.generator_view),
     url(r'^check_for_file',views.check_for_file),
     url(r'^download',views.download),
+    url(r'^artifacts/?$',views.artifacts),
     url(r'^creategh',views.create_github_run),
     url(r'^updategh',views.update_github_run),
     url(r'^startgh',views.startgh),

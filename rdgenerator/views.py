@@ -1,7 +1,8 @@
 import io
 from pathlib import Path
 import binascii
-from django.http import HttpResponse, JsonResponse
+import mimetypes
+from django.http import FileResponse, HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.core.files.base import ContentFile
 import os
@@ -38,6 +39,76 @@ PASSTHROUGH_FIELDS = (
     "no_uninstall",
     "disable_install",
 )
+
+ARTIFACT_EXTENSIONS = {
+    ".apk",
+    ".appimage",
+    ".deb",
+    ".dmg",
+    ".exe",
+    ".flatpak",
+    ".msi",
+    ".rpm",
+    ".zst",
+}
+SAFE_ARTIFACT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+
+
+def _normalize_build_id(value):
+    try:
+        return str(uuid.UUID(str(value)))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _safe_artifact_name(value):
+    name = str(value or "")
+    if (
+        not name
+        or Path(name).name != name
+        or not SAFE_ARTIFACT_NAME.fullmatch(name)
+        or Path(name).suffix.lower() not in ARTIFACT_EXTENSIONS
+    ):
+        return None
+    return name
+
+
+def _artifact_directory(build_id):
+    normalized = _normalize_build_id(build_id)
+    if not normalized:
+        return None
+    return Path(_settings.ARTIFACT_ROOT) / normalized
+
+
+def _artifact_entries(build_id):
+    directory = _artifact_directory(build_id)
+    if directory is None or not directory.is_dir():
+        return []
+    entries = []
+    for path in directory.iterdir():
+        name = _safe_artifact_name(path.name)
+        if not name or not path.is_file() or path.is_symlink():
+            continue
+        stat = path.stat()
+        entries.append(
+            {
+                "name": name,
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+            }
+        )
+    return sorted(entries, key=lambda entry: entry["name"].lower())
+
+
+def _authorized_upload(request):
+    expected = _settings.UPLOAD_TOKEN
+    scheme, separator, supplied = request.headers.get("Authorization", "").partition(" ")
+    return bool(
+        expected
+        and separator
+        and scheme.lower() == "bearer"
+        and secrets.compare_digest(expected, supplied)
+    )
 
 
 def _public_generator_url(request):
@@ -246,6 +317,7 @@ def generator_view(request):
                 "filename":filename,
                 "source_repository": _settings.RUSTDESK_REPOSITORY,
                 "source_ref": _source_ref(version),
+                "upload_token": _settings.UPLOAD_TOKEN,
             }
             for field in PASSTHROUGH_FIELDS:
                 value = cleaned_data.get(field)
@@ -254,7 +326,7 @@ def generator_view(request):
                 inputs_raw[field] = "" if value is None else str(value)
 
             temp_json_path = f"data_{uuid.uuid4()}.json"
-            zip_filename = f"secrets_{uuid.uuid4()}.zip"
+            zip_filename = f"secrets_{myuuid}.zip"
             zip_path = "temp_zips/%s" % (zip_filename)
             Path("temp_zips").mkdir(parents=True, exist_ok=True)
 
@@ -327,6 +399,7 @@ def generator_view(request):
                                 "status": new_github_run.status,
                                 "workflow_run_id": new_github_run.github_run_id,
                                 "log_url": github_data.get('html_url'),
+                                "artifacts_url": f"{full_url}/artifacts?build={myuuid}",
                             },
                             status=202,
                         )
@@ -376,9 +449,10 @@ def check_for_file(request):
     
     if gh_run.status == "success":
         return render(request, 'generated.html', {
-            'filename': filename, 
-            'uuid': uuid, 
-            'platform': platform
+            'filename': filename,
+            'uuid': uuid,
+            'platform': platform,
+            'artifacts': _artifact_entries(uuid),
         })
         
     elif gh_run.status in ['failure', 'cancelled', 'timed_out', 'skipped', 'action_required']:
@@ -400,16 +474,56 @@ def check_for_file(request):
         })
 
 def download(request):
-    filename = request.GET['filename']
-    uuid = request.GET['uuid']
-    file_path = os.path.join('exe', uuid, filename)
-    with open(file_path, 'rb') as file:
-        content = file.read()
-    response = HttpResponse(content, headers={
-        'Content-Type': 'application/vnd.microsoft.portable-executable',
-        'Content-Disposition': f'attachment; filename="{filename}"'
-    })
-    return response
+    build_id = _normalize_build_id(request.GET.get('uuid'))
+    filename = _safe_artifact_name(request.GET.get('filename'))
+    if not build_id or not filename:
+        return JsonResponse({"error": "Invalid build ID or filename"}, status=400)
+
+    directory = _artifact_directory(build_id)
+    file_path = directory / filename
+    if not file_path.is_file() or file_path.is_symlink():
+        return JsonResponse({"error": "Artifact not found"}, status=404)
+
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    return FileResponse(
+        file_path.open("rb"),
+        as_attachment=True,
+        filename=filename,
+        content_type=content_type,
+    )
+
+
+def artifacts(request):
+    requested_build = request.GET.get("build")
+    if requested_build:
+        build_ids = [_normalize_build_id(requested_build)]
+        if not build_ids[0]:
+            return JsonResponse({"error": "Invalid build ID"}, status=400)
+    else:
+        root = Path(_settings.ARTIFACT_ROOT)
+        if not root.is_dir():
+            build_ids = []
+        else:
+            build_ids = [
+                path.name
+                for path in root.iterdir()
+                if path.is_dir() and _normalize_build_id(path.name)
+            ]
+
+    builds = []
+    for build_id in build_ids:
+        entries = _artifact_entries(build_id)
+        if not entries:
+            continue
+        builds.append(
+            {
+                "uuid": build_id,
+                "artifacts": entries,
+                "modified": max(entry["modified"] for entry in entries),
+            }
+        )
+    builds.sort(key=lambda build: build["modified"], reverse=True)
+    return render(request, "artifacts.html", {"builds": builds})
 
 def get_png(request):
     filename = request.GET['filename']
@@ -535,47 +649,78 @@ def save_png(file, uuid, domain, name):
     return domain, uuid, name
 
 def save_custom_client(request):
-    file = request.FILES['file']
-    myuuid = request.POST.get('uuid')
-    file_save_path = "exe/%s/%s" % (myuuid, file.name)
-    Path("exe/%s" % myuuid).mkdir(parents=True, exist_ok=True)
-    with open(file_save_path, "wb+") as f:
-        for chunk in file.chunks():
-            f.write(chunk)
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+    if not _authorized_upload(request):
+        return JsonResponse({"error": "Invalid upload token"}, status=401)
 
-    return HttpResponse("File saved successfully!")
+    uploaded_file = request.FILES.get("file")
+    build_id = _normalize_build_id(request.POST.get("uuid"))
+    filename = _safe_artifact_name(uploaded_file.name if uploaded_file else None)
+    if not uploaded_file or not build_id or not filename:
+        return JsonResponse(
+            {"error": "A valid build UUID and supported artifact file are required"},
+            status=400,
+        )
+
+    directory = _artifact_directory(build_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / filename
+    temporary = directory / f".{filename}.{secrets.token_hex(8)}.part"
+    try:
+        with temporary.open("wb") as target:
+            for chunk in uploaded_file.chunks():
+                target.write(chunk)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+    return JsonResponse(
+        {
+            "status": "saved",
+            "uuid": build_id,
+            "filename": filename,
+            "size": destination.stat().st_size,
+            "download_url": f"/download?uuid={build_id}&filename={filename}",
+        },
+        status=201,
+    )
 
 def cleanup_secrets(request):
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+    if not _authorized_upload(request):
+        return JsonResponse({"error": "Invalid upload token"}, status=401)
+
     # Pass the UUID as a query param or in JSON body
-    data = json.loads(request.body)
-    my_uuid = data.get('uuid')
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    my_uuid = _normalize_build_id(data.get('uuid'))
     
     if not my_uuid:
         return HttpResponse("Missing UUID", status=400)
 
-    # 1. Find the files in your temp directory matching the UUID
-    temp_dir = os.path.join('temp_zips')
-    
-    # We look for any file starting with 'secrets_' and containing the uuid
-    for filename in os.listdir(temp_dir):
-        if my_uuid in filename and filename.endswith('.zip'):
-            file_path = os.path.join(temp_dir, filename)
-            try:
-                os.remove(file_path)
-                print(f"Successfully deleted {file_path}")
-            except OSError as e:
-                print(f"Error deleting file: {e}")
+    file_path = Path("temp_zips") / f"secrets_{my_uuid}.zip"
+    file_path.unlink(missing_ok=True)
 
     return HttpResponse("Cleanup successful", status=200)
 
 def get_zip(request):
-    filename = request.GET['filename']
-    #filename = filename+".exe"
-    file_path = os.path.join('temp_zips',filename)
-    with open(file_path, 'rb') as file:
-        response = HttpResponse(file, headers={
-            'Content-Type': 'application/vnd.microsoft.portable-executable',
-            'Content-Disposition': f'attachment; filename="{filename}"'
-        })
-
-    return response
+    filename = request.GET.get('filename', '')
+    match = re.fullmatch(
+        r"secrets_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.zip",
+        filename,
+    )
+    if not match or not _normalize_build_id(match.group(1)):
+        return JsonResponse({"error": "Invalid filename"}, status=400)
+    file_path = Path("temp_zips") / filename
+    if not file_path.is_file():
+        return JsonResponse({"error": "File not found"}, status=404)
+    return FileResponse(
+        file_path.open("rb"),
+        as_attachment=True,
+        filename=filename,
+        content_type="application/zip",
+    )

@@ -35,6 +35,8 @@ REPONAME = os.environ.get("REPONAME", 'rdgen')
 RUSTDESK_REPOSITORY = os.environ.get("RUSTDESK_REPOSITORY", 'rustdesk/rustdesk')
 RUSTDESK_REF = os.environ.get("RUSTDESK_REF", '')
 RUSTDESK_PUBLIC_KEY_FILE = os.environ.get("RUSTDESK_PUBLIC_KEY_FILE", '')
+UPLOAD_TOKEN = os.environ.get("UPLOAD_TOKEN", '')
+ARTIFACT_ROOT = Path(os.environ.get("ARTIFACT_ROOT", BASE_DIR / 'exe'))
 SH_SECRET = os.environ.get('SH_SECRET', '')
 
 MEDIA_URL = '/media/'

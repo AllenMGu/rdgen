@@ -44,3 +44,20 @@ server address without a public key is rejected instead of silently embedding
 RustDesk's public-server key. An integrated deployment may set
 `RUSTDESK_PUBLIC_KEY_FILE` to a readable `id_ed25519.pub`; that key is used
 when the JSON field is empty.
+
+## Stored build artifacts
+
+Set a long random `UPLOAD_TOKEN` in the rdgen environment. The encrypted build
+input passes this token to GitHub Actions, which uses it only to authenticate
+artifact uploads and encrypted-input cleanup callbacks.
+
+Completed clients are stored below `ARTIFACT_ROOT` (default: `./exe`) using
+this layout:
+
+```text
+<ARTIFACT_ROOT>/<build-uuid>/<generated-file>
+```
+
+Open `/artifacts` to list and download every saved client. Files are streamed
+from disk and are not automatically deleted. Protect the generator and
+artifact pages with reverse-proxy authentication.

@@ -112,7 +112,7 @@ jobs:
         with:
           url: "${{ secrets.GENURL }}/cleanzip"
           method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
+          customHeaders: '{"Content-Type": "application/json", "Authorization": "Bearer ${{ env.upload_token }}"}'
           data: '{"uuid": "${{ env.uuid }}"}'
 
       - name: Free Disk Space (Ubuntu)
@@ -572,7 +572,7 @@ jobs:
           max_attempts: 3
           shell: bash
           command: |
-            curl -i -X POST -H "Content-Type: multipart/form-data" -H "Authorization: Bearer ${{ env.token }}" -F "file=@./signed-apk/${{ env.filename }}-${{ matrix.job.arch }}.apk" -F "uuid=${{ env.uuid }}" ${{ secrets.GENURL }}/save_custom_client
+            curl --fail-with-body --show-error --silent -X POST -H "Content-Type: multipart/form-data" -H "Authorization: Bearer ${{ env.upload_token }}" -F "file=@./signed-apk/${{ env.filename }}-${{ matrix.job.arch }}.apk" -F "uuid=${{ env.uuid }}" ${{ secrets.GENURL }}/save_custom_client
 
       - name: send file to api server
         if: ${{ env.rdgen == 'false' }}
@@ -607,7 +607,7 @@ jobs:
         with:
           url: "${{ secrets.GENURL }}/cleanzip"
           method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
+          customHeaders: '{"Content-Type": "application/json", "Authorization": "Bearer ${{ env.upload_token }}"}'
           data: '{"uuid": "${{ env.uuid }}"}'
 
       - name: Set rdgen value

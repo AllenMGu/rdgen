@@ -1,11 +1,14 @@
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import RequestFactory, SimpleTestCase, override_settings
 
 from .custom_config import build_custom_config
 from .forms import GenerateForm
-from .views import _generator_form, _server_public_key
+from .views import _generator_form, _safe_artifact_name, _server_public_key
 
 
 REQUESTED_FIELDS = {
@@ -200,3 +203,51 @@ class CustomConfigTests(SimpleTestCase):
         self.assertEqual("balanced", defaults["image-quality"])
         self.assertEqual("30", defaults["custom-fps"])
         self.assertEqual("custom-value", defaults["custom-setting"])
+
+
+class ArtifactStorageTests(SimpleTestCase):
+    build_id = "6b5d395f-2478-4ca9-8383-34c0057deab8"
+
+    def test_rejects_unauthorized_upload(self):
+        with TemporaryDirectory() as artifact_root, override_settings(
+            ARTIFACT_ROOT=Path(artifact_root),
+            UPLOAD_TOKEN="test-upload-token",
+        ):
+            response = self.client.post(
+                "/save_custom_client",
+                {
+                    "uuid": self.build_id,
+                    "file": SimpleUploadedFile("client.exe", b"binary"),
+                },
+            )
+        self.assertEqual(401, response.status_code)
+
+    def test_uploads_lists_and_streams_saved_artifact(self):
+        with TemporaryDirectory() as artifact_root, override_settings(
+            ARTIFACT_ROOT=Path(artifact_root),
+            UPLOAD_TOKEN="test-upload-token",
+        ):
+            response = self.client.post(
+                "/save_custom_client",
+                {
+                    "uuid": self.build_id,
+                    "file": SimpleUploadedFile("client.exe", b"binary"),
+                },
+                HTTP_AUTHORIZATION="Bearer test-upload-token",
+            )
+            self.assertEqual(201, response.status_code, response.content)
+            saved = Path(artifact_root) / self.build_id / "client.exe"
+            self.assertEqual(b"binary", saved.read_bytes())
+
+            listing = self.client.get(f"/artifacts?build={self.build_id}")
+            self.assertContains(listing, "client.exe")
+
+            download = self.client.get(
+                f"/download?uuid={self.build_id}&filename=client.exe"
+            )
+            self.assertEqual(200, download.status_code)
+            self.assertEqual(b"binary", b"".join(download.streaming_content))
+
+    def test_rejects_unsafe_artifact_names(self):
+        self.assertIsNone(_safe_artifact_name("../client.exe"))
+        self.assertIsNone(_safe_artifact_name("client.txt"))

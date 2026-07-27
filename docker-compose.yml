@@ -16,6 +16,8 @@ services:
       RUSTDESK_REPOSITORY: ${RUSTDESK_REPOSITORY:-rustdesk/rustdesk}
       RUSTDESK_REF: ${RUSTDESK_REF:-}
       RUSTDESK_PUBLIC_KEY_FILE: ${RUSTDESK_PUBLIC_KEY_FILE:-}
+      UPLOAD_TOKEN: ${UPLOAD_TOKEN:?Set UPLOAD_TOKEN}
+      ARTIFACT_ROOT: /opt/rdgen/exe
       SH_SECRET: ${SH_SECRET:?Set SH_SECRET}
     ports:
       - "8000:8000"

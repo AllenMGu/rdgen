@@ -108,7 +108,7 @@ jobs:
         with:
           url: "${{ secrets.GENURL }}/cleanzip"
           method: 'POST'
-          customHeaders: '{"Content-Type": "application/json"}'
+          customHeaders: '{"Content-Type": "application/json", "Authorization": "Bearer ${{ env.upload_token }}"}'
           data: '{"uuid": "${{ env.uuid }}"}'
 
       - name: Export GitHub Actions cache environment variables
@@ -672,9 +672,9 @@ jobs:
         if: ${{ env.rdgen == 'true' }}
         shell: bash
         run: |
-          curl -i -X POST \
+          curl --fail-with-body --show-error --silent -X POST \
             -H "Content-Type: multipart/form-data" \
-            -H "Authorization: Bearer ${{ env.token }}" \
+            -H "Authorization: Bearer ${{ env.upload_token }}" \
             -F "file=@$GITHUB_WORKSPACE/${{ env.filename }}-${{ matrix.job.arch }}.dmg" \
             -F "uuid=${{ env.uuid }}" \
             "${{ secrets.GENURL }}/save_custom_client"
