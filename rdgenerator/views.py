@@ -1,7 +1,8 @@
 import io
 from pathlib import Path
+import binascii
 from django.http import HttpResponse, JsonResponse
-from django.shortcuts import render
+from django.shortcuts import get_object_or_404, render
 from django.core.files.base import ContentFile
 import os
 import secrets
@@ -13,82 +14,152 @@ import uuid
 import pyzipper
 from django.conf import settings as _settings
 from django.db.models import Q
+from .custom_config import build_custom_config
 from .forms import GenerateForm
 from .models import GithubRun
 from PIL import Image
-from urllib.parse import quote
+
+
+PASSTHROUGH_FIELDS = (
+    "ui_mode",
+    "updateLink",
+    "unlockPin",
+    "delayFix",
+    "cycleMonitor",
+    "xOffline",
+    "removeNewVersionNotif",
+    "hide_chat_voice",
+    "hide_sensitive_ui",
+    "hideMenuBar",
+    "hideQuit",
+    "addcopy",
+    "applyprivacy",
+    "passpolicy",
+    "no_uninstall",
+    "disable_install",
+)
+
+
+def _public_generator_url(request):
+    configured_url = _settings.GENURL.strip().rstrip("/")
+    if configured_url:
+        if "://" not in configured_url:
+            configured_url = f"{_settings.PROTOCOL}://{configured_url}"
+        return configured_url
+    return f"{_settings.PROTOCOL}://{request.get_host()}"
+
+
+def _generator_form(request):
+    is_json = request.content_type == "application/json"
+    if not is_json:
+        return GenerateForm(request.POST, request.FILES), False
+
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return None, True
+    if not isinstance(payload, dict):
+        return None, True
+
+    # Saved browser configurations use these names for base64 image data.
+    for file_field, base64_field in (
+        ("iconfile", "iconbase64"),
+        ("logofile", "logobase64"),
+        ("privacy_wallpaper", "privacybase64"),
+    ):
+        value = payload.get(file_field)
+        if isinstance(value, str) and value.startswith("data:image/"):
+            payload[base64_field] = value
+    if payload.get("view_style") is False:
+        payload["view_style"] = ""
+    if isinstance(payload.get("privacy_wallpaper"), dict):
+        payload["privacy_wallpaper"] = ""
+    return GenerateForm(payload), True
+
+
+def _workflow_url(platform, selfhosted):
+    workflow = {
+        "windows": "sh-generator-windows.yml" if selfhosted else "generator-windows.yml",
+        "windows-x86": "generator-windows-x86.yml",
+        "linux": "generator-linux.yml",
+        "android": "generator-android.yml",
+        "macos": "generator-macos.yml",
+    }.get(platform, "generator-windows.yml")
+    return (
+        f"https://api.github.com/repos/{_settings.GHUSER}/{_settings.REPONAME}"
+        f"/actions/workflows/{workflow}/dispatches"
+    )
+
+
+def _source_ref(version):
+    if _settings.RUSTDESK_REF:
+        return _settings.RUSTDESK_REF
+    if _settings.RUSTDESK_REPOSITORY != "rustdesk/rustdesk":
+        return "master"
+    return "master" if version == "master" else f"refs/tags/{version}"
+
+
+def _server_public_key():
+    key_file = _settings.RUSTDESK_PUBLIC_KEY_FILE.strip()
+    if not key_file:
+        return ""
+    try:
+        key = Path(key_file).read_text(encoding="utf-8").strip()
+        decoded_key = base64.b64decode(key, validate=True)
+    except (OSError, ValueError, binascii.Error):
+        return ""
+    return key if len(decoded_key) == 32 else ""
+
 
 def generator_view(request):
     if request.method == 'POST':
-        form = GenerateForm(request.POST, request.FILES)
+        form, is_json = _generator_form(request)
+        if form is None:
+            return JsonResponse({"error": "Request body must be a JSON object"}, status=400)
+
         if form.is_valid():
-            user_secret = form.cleaned_data['sh_secret_field']
-            if _settings.SH_SECRET == user_secret:
-                selfhosted = True
-            else:
-                selfhosted = False
-            platform = form.cleaned_data['platform']
-            version = form.cleaned_data['version']
-            delayFix = form.cleaned_data['delayFix']
-            cycleMonitor = form.cleaned_data['cycleMonitor']
-            xOffline = form.cleaned_data['xOffline']
-            hidecm = form.cleaned_data['hidecm']
-            removeNewVersionNotif = form.cleaned_data['removeNewVersionNotif']
-            server = form.cleaned_data['serverIP']
-            key = form.cleaned_data['key']
-            apiServer = form.cleaned_data['apiServer']
-            urlLink = form.cleaned_data['urlLink']
-            downloadLink = form.cleaned_data['downloadLink']
+            cleaned_data = form.cleaned_data
+            user_secret = cleaned_data['sh_secret_field']
+            selfhosted = bool(user_secret) and secrets.compare_digest(
+                _settings.SH_SECRET, user_secret
+            )
+            platform = cleaned_data['platform']
+            version = cleaned_data['version']
+            server = cleaned_data['serverIP']
+            key = cleaned_data['RS_PUB_KEY'] or cleaned_data['key']
+            apiServer = cleaned_data['apiServer']
+            urlLink = cleaned_data['urlLink']
+            downloadLink = cleaned_data['downloadLink']
+            updateLink = cleaned_data['updateLink']
             if not server:
                 server = 'rs-ny.rustdesk.com' #default rustdesk server
+            if not key and cleaned_data['serverIP']:
+                key = _server_public_key()
             if not key:
-                key = 'OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=' #default rustdesk key
+                if cleaned_data['serverIP']:
+                    form.add_error(
+                        'RS_PUB_KEY',
+                        'A RustDesk server public key is required for a custom server.',
+                    )
+                else:
+                    key = 'OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw='
             if not apiServer:
                 apiServer = server+":21114"
             if not urlLink:
                 urlLink = "https://rustdesk.com"
             if not downloadLink:
                 downloadLink = "https://rustdesk.com/download"
-            direction = form.cleaned_data['direction']
-            installation = form.cleaned_data['installation']
-            settings = form.cleaned_data['settings']
-            appname = form.cleaned_data['appname']
+            appname = cleaned_data['appname']
             if not appname:
                 appname = "rustdesk"
-            filename = form.cleaned_data['exename']
-            compname = form.cleaned_data['compname']
+            filename = cleaned_data['exename']
+            compname = cleaned_data['compname']
             if not compname:
                 compname = "Purslane Ltd"
-            androidappid = form.cleaned_data['androidappid']
+            androidappid = cleaned_data['androidappid']
             if not androidappid:
                 androidappid = "com.carriez.flutter_hbb"
             compname = compname.replace("&","\\&")
-            permPass = form.cleaned_data['permanentPassword']
-            theme = form.cleaned_data['theme']
-            themeDorO = form.cleaned_data['themeDorO']
-            #runasadmin = form.cleaned_data['runasadmin']
-            passApproveMode = form.cleaned_data['passApproveMode']
-            denyLan = form.cleaned_data['denyLan']
-            enableDirectIP = form.cleaned_data['enableDirectIP']
-            #ipWhitelist = form.cleaned_data['ipWhitelist']
-            autoClose = form.cleaned_data['autoClose']
-            permissionsDorO = form.cleaned_data['permissionsDorO']
-            permissionsType = form.cleaned_data['permissionsType']
-            enableKeyboard = form.cleaned_data['enableKeyboard']
-            enableClipboard = form.cleaned_data['enableClipboard']
-            enableFileTransfer = form.cleaned_data['enableFileTransfer']
-            enableAudio = form.cleaned_data['enableAudio']
-            enableTCP = form.cleaned_data['enableTCP']
-            enableRemoteRestart = form.cleaned_data['enableRemoteRestart']
-            enableRecording = form.cleaned_data['enableRecording']
-            enableBlockingInput = form.cleaned_data['enableBlockingInput']
-            enableRemoteModi = form.cleaned_data['enableRemoteModi']
-            removeWallpaper = form.cleaned_data['removeWallpaper']
-            defaultManual = form.cleaned_data['defaultManual']
-            overrideManual = form.cleaned_data['overrideManual']
-            enablePrinter = form.cleaned_data['enablePrinter']
-            enableCamera = form.cleaned_data['enableCamera']
-            enableTerminal = form.cleaned_data['enableTerminal']
 
             if all(char.isascii() for char in filename):
                 filename = re.sub(r'[^\w\s-]', '_', filename).strip()
@@ -97,14 +168,17 @@ def generator_view(request):
                 filename = "rustdesk"
             if not all(char.isascii() for char in appname):
                 appname = "rustdesk"
+            if not form.is_valid():
+                if is_json:
+                    return JsonResponse({"errors": form.errors.get_json_data()}, status=400)
+                return render(request, 'generator.html', {'form': form}, status=400)
+
             myuuid = str(uuid.uuid4())
-            protocol = _settings.PROTOCOL
-            host = request.get_host()
-            full_url = f"{protocol}://{host}"
+            full_url = _public_generator_url(request)
             try:
-                iconfile = form.cleaned_data.get('iconfile')
+                iconfile = cleaned_data.get('iconfile')
                 if not iconfile:
-                    iconfile = form.cleaned_data.get('iconbase64')
+                    iconfile = cleaned_data.get('iconbase64')
                 iconlink_url, iconlink_uuid, iconlink_file = save_png(iconfile,myuuid,full_url,"icon.png")
             except:
                 print("failed to get icon, using default")
@@ -112,9 +186,9 @@ def generator_view(request):
                 iconlink_uuid = "false"
                 iconlink_file = "false"
             try:
-                logofile = form.cleaned_data.get('logofile')
+                logofile = cleaned_data.get('logofile')
                 if not logofile:
-                    logofile = form.cleaned_data.get('logobase64')
+                    logofile = cleaned_data.get('logobase64')
                 logolink_url, logolink_uuid, logolink_file = save_png(logofile,myuuid,full_url,"logo.png")
             except:
                 print("failed to get logo")
@@ -122,9 +196,9 @@ def generator_view(request):
                 logolink_uuid = "false"
                 logolink_file = "false"
             try:
-                privacyfile = form.cleaned_data.get('privacyfile')
+                privacyfile = cleaned_data.get('privacyfile')
                 if not privacyfile:
-                    privacyfile = form.cleaned_data.get('privacybase64')
+                    privacyfile = cleaned_data.get('privacybase64')
                 privacylink_url, privacylink_uuid, privacylink_file = save_png(privacyfile,myuuid,full_url,"privacy.png")
             except:
                 print("failed to get logo")
@@ -132,121 +206,20 @@ def generator_view(request):
                 privacylink_uuid = "false"
                 privacylink_file = "false"
 
-            ###create the custom.txt json here and send in as inputs below
-            decodedCustom = {}
-            if direction != "Both":
-                decodedCustom['conn-type'] = direction
-            if installation == "installationN":
-                decodedCustom['disable-installation'] = 'Y'
-            if settings == "settingsN":
-                decodedCustom['disable-settings'] = 'Y'
-            if appname.upper != "rustdesk".upper and appname != "":
-                decodedCustom['app-name'] = appname
-            decodedCustom['override-settings'] = {}
-            decodedCustom['default-settings'] = {}
-            if permPass != "":
-                decodedCustom['password'] = permPass
-            if theme != "system":
-                if themeDorO == "default":
-                    if platform == "windows-x86":
-                        decodedCustom['default-settings']['allow-darktheme'] = 'Y' if theme == "dark" else 'N'
-                    else:
-                        decodedCustom['default-settings']['theme'] = theme
-                elif themeDorO == "override":
-                    if platform == "windows-x86":
-                        decodedCustom['override-settings']['allow-darktheme'] = 'Y' if theme == "dark" else 'N'
-                    else:
-                        decodedCustom['override-settings']['theme'] = theme
-            decodedCustom['enable-lan-discovery'] = 'N' if denyLan else 'Y'
-            #decodedCustom['direct-server'] = 'Y' if enableDirectIP else 'N'
-            decodedCustom['allow-auto-disconnect'] = 'Y' if autoClose else 'N'
-            if permissionsDorO == "default":
-                decodedCustom['default-settings']['access-mode'] = permissionsType
-                decodedCustom['default-settings']['enable-keyboard'] = 'Y' if enableKeyboard else 'N'
-                decodedCustom['default-settings']['enable-clipboard'] = 'Y' if enableClipboard else 'N'
-                decodedCustom['default-settings']['enable-file-transfer'] = 'Y' if enableFileTransfer else 'N'
-                decodedCustom['default-settings']['enable-audio'] = 'Y' if enableAudio else 'N'
-                decodedCustom['default-settings']['enable-tunnel'] = 'Y' if enableTCP else 'N'
-                decodedCustom['default-settings']['enable-remote-restart'] = 'Y' if enableRemoteRestart else 'N'
-                decodedCustom['default-settings']['enable-record-session'] = 'Y' if enableRecording else 'N'
-                decodedCustom['default-settings']['enable-block-input'] = 'Y' if enableBlockingInput else 'N'
-                decodedCustom['default-settings']['allow-remote-config-modification'] = 'Y' if enableRemoteModi else 'N'
-                decodedCustom['default-settings']['direct-server'] = 'Y' if enableDirectIP else 'N'
-                decodedCustom['default-settings']['verification-method'] = 'use-permanent-password' if hidecm else 'use-both-passwords'
-                decodedCustom['default-settings']['approve-mode'] = passApproveMode
-                decodedCustom['default-settings']['allow-hide-cm'] = 'Y' if hidecm else 'N'
-                decodedCustom['default-settings']['allow-remove-wallpaper'] = 'Y' if removeWallpaper else 'N'
-                decodedCustom['default-settings']['enable-remote-printer'] = 'Y' if enablePrinter else 'N'
-                decodedCustom['default-settings']['enable-camera'] = 'Y' if enableCamera else 'N'
-                decodedCustom['default-settings']['enable-terminal'] = 'Y' if enableTerminal else 'N'
-            else:
-                decodedCustom['override-settings']['access-mode'] = permissionsType
-                decodedCustom['override-settings']['enable-keyboard'] = 'Y' if enableKeyboard else 'N'
-                decodedCustom['override-settings']['enable-clipboard'] = 'Y' if enableClipboard else 'N'
-                decodedCustom['override-settings']['enable-file-transfer'] = 'Y' if enableFileTransfer else 'N'
-                decodedCustom['override-settings']['enable-audio'] = 'Y' if enableAudio else 'N'
-                decodedCustom['override-settings']['enable-tunnel'] = 'Y' if enableTCP else 'N'
-                decodedCustom['override-settings']['enable-remote-restart'] = 'Y' if enableRemoteRestart else 'N'
-                decodedCustom['override-settings']['enable-record-session'] = 'Y' if enableRecording else 'N'
-                decodedCustom['override-settings']['enable-block-input'] = 'Y' if enableBlockingInput else 'N'
-                decodedCustom['override-settings']['allow-remote-config-modification'] = 'Y' if enableRemoteModi else 'N'
-                decodedCustom['override-settings']['direct-server'] = 'Y' if enableDirectIP else 'N'
-                decodedCustom['override-settings']['verification-method'] = 'use-permanent-password' if hidecm else 'use-both-passwords'
-                decodedCustom['override-settings']['approve-mode'] = passApproveMode
-                decodedCustom['override-settings']['allow-hide-cm'] = 'Y' if hidecm else 'N'
-                decodedCustom['override-settings']['allow-remove-wallpaper'] = 'Y' if removeWallpaper else 'N'
-                decodedCustom['override-settings']['enable-remote-printer'] = 'Y' if enablePrinter else 'N'
-                decodedCustom['override-settings']['enable-camera'] = 'Y' if enableCamera else 'N'
-                decodedCustom['override-settings']['enable-terminal'] = 'Y' if enableTerminal else 'N'
+            try:
+                decodedCustom = build_custom_config(cleaned_data)
+            except ValueError as exc:
+                if is_json:
+                    return JsonResponse({"error": str(exc)}, status=400)
+                form.add_error(None, str(exc))
+                return render(request, 'generator.html', {'form': form}, status=400)
 
-            for line in defaultManual.splitlines():
-                k, value = line.split('=')
-                decodedCustom['default-settings'][k.strip()] = value.strip()
-
-            for line in overrideManual.splitlines():
-                k, value = line.split('=')
-                decodedCustom['override-settings'][k.strip()] = value.strip()
-            
-            decodedCustomJson = json.dumps(decodedCustom)
-
+            decodedCustomJson = json.dumps(decodedCustom, ensure_ascii=True)
             string_bytes = decodedCustomJson.encode("ascii")
             base64_bytes = base64.b64encode(string_bytes)
             encodedCustom = base64_bytes.decode("ascii")
 
-            # #github limits inputs to 10, so lump extras into one with json
-            # extras = {}
-            # extras['genurl'] = _settings.GENURL
-            # #extras['runasadmin'] = runasadmin
-            # extras['urlLink'] = urlLink
-            # extras['downloadLink'] = downloadLink
-            # extras['delayFix'] = 'true' if delayFix else 'false'
-            # extras['rdgen'] = 'true'
-            # extras['cycleMonitor'] = 'true' if cycleMonitor else 'false'
-            # extras['xOffline'] = 'true' if xOffline else 'false'
-            # extras['removeNewVersionNotif'] = 'true' if removeNewVersionNotif else 'false'
-            # extras['compname'] = compname
-            # extras['androidappid'] = androidappid
-            # extra_input = json.dumps(extras)
-
-            ####from here run the github action, we need user, repo, access token.
-            if platform == 'windows':
-                url = 'https://api.github.com/repos/'+_settings.GHUSER+'/'+_settings.REPONAME+'/actions/workflows/generator-windows.yml/dispatches'
-                if selfhosted:
-                    url = 'https://api.github.com/repos/'+_settings.GHUSER+'/'+_settings.REPONAME+'/actions/workflows/sh-generator-windows.yml/dispatches'
-            if platform == 'windows-x86':
-                url = 'https://api.github.com/repos/'+_settings.GHUSER+'/'+_settings.REPONAME+'/actions/workflows/generator-windows-x86.yml/dispatches'
-            elif platform == 'linux':
-                url = 'https://api.github.com/repos/'+_settings.GHUSER+'/'+_settings.REPONAME+'/actions/workflows/generator-linux.yml/dispatches'
-            elif platform == 'android':
-                url = 'https://api.github.com/repos/'+_settings.GHUSER+'/'+_settings.REPONAME+'/actions/workflows/generator-android.yml/dispatches'
-            elif platform == 'macos':
-                url = 'https://api.github.com/repos/'+_settings.GHUSER+'/'+_settings.REPONAME+'/actions/workflows/generator-macos.yml/dispatches'
-            else:
-                url = 'https://api.github.com/repos/'+_settings.GHUSER+'/'+_settings.REPONAME+'/actions/workflows/generator-windows.yml/dispatches'
-                if selfhosted:
-                    url = 'https://api.github.com/repos/'+_settings.GHUSER+'/'+_settings.REPONAME+'/actions/workflows/sh-generator-windows.yml/dispatches'
-
-            #url = 'https://api.github.com/repos/'+_settings.GHUSER+'/rustdesk/actions/workflows/test.yml/dispatches'  
+            url = _workflow_url(platform, selfhosted)
             inputs_raw = {
                 "server":server,
                 "key":key,
@@ -263,33 +236,48 @@ def generator_view(request):
                 "privacylink_uuid":privacylink_uuid,
                 "privacylink_file":privacylink_file,
                 "appname":appname,
-                "genurl":_settings.GENURL,
+                "genurl":full_url,
                 "urlLink":urlLink,
                 "downloadLink":downloadLink,
-                "delayFix": 'true' if delayFix else 'false',
+                "updateLink":updateLink,
                 "rdgen":'true',
-                "cycleMonitor": 'true' if cycleMonitor else 'false',
-                "xOffline": 'true' if xOffline else 'false',
-                "removeNewVersionNotif": 'true' if removeNewVersionNotif else 'false',
                 "compname": compname,
                 "androidappid":androidappid,
-                "filename":filename
+                "filename":filename,
+                "source_repository": _settings.RUSTDESK_REPOSITORY,
+                "source_ref": _source_ref(version),
             }
+            for field in PASSTHROUGH_FIELDS:
+                value = cleaned_data.get(field)
+                if isinstance(value, bool):
+                    value = "true" if value else "false"
+                inputs_raw[field] = "" if value is None else str(value)
 
             temp_json_path = f"data_{uuid.uuid4()}.json"
             zip_filename = f"secrets_{uuid.uuid4()}.zip"
             zip_path = "temp_zips/%s" % (zip_filename)
             Path("temp_zips").mkdir(parents=True, exist_ok=True)
 
-            with open(temp_json_path, "w") as f:
-                json.dump(inputs_raw, f)
+            try:
+                with open(temp_json_path, "w") as f:
+                    json.dump(inputs_raw, f)
 
-            with pyzipper.AESZipFile(zip_path, 'w', compression=pyzipper.ZIP_LZMA, encryption=pyzipper.WZ_AES) as zf:
-                zf.setpassword(_settings.ZIP_PASSWORD.encode())
-                zf.write(temp_json_path, arcname="secrets.json")
-
-            if os.path.exists(temp_json_path):
-                os.remove(temp_json_path)
+                with pyzipper.AESZipFile(
+                    zip_path,
+                    'w',
+                    compression=pyzipper.ZIP_LZMA,
+                    encryption=pyzipper.WZ_AES,
+                ) as zf:
+                    zf.setpassword(_settings.ZIP_PASSWORD.encode())
+                    zf.write(temp_json_path, arcname="secrets.json")
+            except Exception:
+                Path(zip_path).unlink(missing_ok=True)
+                return JsonResponse(
+                    {"error": "Failed to prepare encrypted build inputs"},
+                    status=500,
+                )
+            finally:
+                Path(temp_json_path).unlink(missing_ok=True)
 
             zipJson = {}
             zipJson['url'] = full_url
@@ -301,7 +289,9 @@ def generator_view(request):
                 "ref":_settings.GHBRANCH,
                 "inputs":{
                     "version":version,
-                    "zip_url":zip_url
+                    "zip_url":zip_url,
+                    "source_repository": _settings.RUSTDESK_REPOSITORY,
+                    "source_ref": _source_ref(version),
                 },
                 "return_run_details": True
             } 
@@ -318,29 +308,46 @@ def generator_view(request):
             )
             try:
                 response = requests.post(url, json=data, headers=headers)
-                #print(response)
-                if response.status_code == 204 or response.status_code == 200:
+                if response.status_code == 200:
                     github_data = response.json()
-                    print(github_data)
                     new_github_run.github_run_id = github_data.get('workflow_run_id')
+                    if not new_github_run.github_run_id:
+                        Path(zip_path).unlink(missing_ok=True)
+                        return JsonResponse(
+                            {"error": "GitHub did not return a workflow run ID"},
+                            status=502,
+                        )
                     new_github_run.status = "in_progress"
                     new_github_run.save()
 
+                    if is_json:
+                        return JsonResponse(
+                            {
+                                "uuid": myuuid,
+                                "status": new_github_run.status,
+                                "workflow_run_id": new_github_run.github_run_id,
+                                "log_url": github_data.get('html_url'),
+                            },
+                            status=202,
+                        )
                     return render(request, 'waiting.html', {'filename':filename, 'uuid':myuuid, 'status':"Starting generator...please wait", 'platform':platform, 'log_url': github_data.get('html_url')})
                 else:
-                    #new_github_run.delete()
-                    return JsonResponse({"error": "GitHub rejected the start request"}, status=500)
+                    Path(zip_path).unlink(missing_ok=True)
+                    return JsonResponse(
+                        {
+                            "error": "GitHub rejected the start request",
+                            "github_status": response.status_code,
+                        },
+                        status=502,
+                    )
             except Exception as e:
-                #new_github_run.delete()
+                Path(zip_path).unlink(missing_ok=True)
                 return JsonResponse({"error": f"Connection error: {str(e)}"}, status=500)
+        elif is_json:
+            return JsonResponse({"errors": form.errors.get_json_data()}, status=400)
     else:
         form = GenerateForm()
-    #return render(request, 'maintenance.html')
     return render(request, 'generator.html', {'form': form})
-
-
-from django.shortcuts import render, get_object_or_404
-from django.db.models import Q
 
 def check_for_file(request):
     filename = request.GET.get('filename')

@@ -13,6 +13,16 @@ on:
         required: true
         default: ''
         type: string
+      source_repository:
+        description: 'RustDesk source repository (owner/name)'
+        required: true
+        default: 'rustdesk/rustdesk'
+        type: string
+      source_ref:
+        description: 'RustDesk source branch, tag, or commit'
+        required: true
+        default: 'master'
+        type: string
 
 
 env:
@@ -50,6 +60,8 @@ jobs:
     uses: ./.github/workflows/bridge.yml
     with:
       version: ${{ inputs.version }}
+      source_repository: ${{ inputs.source_repository }}
+      source_ref: ${{ inputs.source_ref }}
 
   build-rustdesk-android:
     needs: [generate-bridge-linux, setup]
@@ -174,18 +186,10 @@ jobs:
           sudo apt-get install -y potrace
 
       - name: Checkout source code
-        if: ${{ env.VERSION != 'master' }}
         uses: actions/checkout@v4
         with:
-          repository: rustdesk/rustdesk
-          ref: refs/tags/${{ env.VERSION }}
-          submodules: recursive
-       
-      - name: Checkout source code
-        if: ${{ env.VERSION == 'master' }}
-        uses: actions/checkout@v4
-        with:
-          repository: rustdesk/rustdesk
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ inputs.source_ref }}
           submodules: recursive
 
       - name: Install flutter

@@ -1,17 +1,65 @@
 from django import forms
+from django.core.validators import RegexValidator
 from PIL import Image
+
+
+SAFE_NAME = RegexValidator(
+    r"^[A-Za-z0-9][A-Za-z0-9 ._()-]*$",
+    "Use only ASCII letters, numbers, spaces, dots, underscores, hyphens, and parentheses.",
+)
+SAFE_COMPANY = RegexValidator(
+    r"^[A-Za-z0-9][A-Za-z0-9 .,_&()-]*$",
+    "Company name contains unsupported characters.",
+)
+SAFE_HOST = RegexValidator(
+    r"^[A-Za-z0-9.:\[\]-]+$",
+    "Enter a hostname or IP address, optionally followed by a port.",
+)
+BASE64_PUBLIC_KEY = RegexValidator(
+    r"^[A-Za-z0-9+/=]+$",
+    "The RustDesk public key must be base64 text.",
+)
+ANDROID_APP_ID = RegexValidator(
+    r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$",
+    "Enter a valid Android application ID.",
+)
+
+
+RUSTDESK_VERSIONS = [
+    ('master', 'nightly'),
+    ('1.4.9', '1.4.9'),
+    ('1.4.8', '1.4.8'),
+    ('1.4.7', '1.4.7'),
+    ('1.4.6', '1.4.6'),
+    ('1.4.5', '1.4.5'),
+    ('1.4.4', '1.4.4'),
+    ('1.4.3', '1.4.3'),
+    ('1.4.2', '1.4.2'),
+    ('1.4.1', '1.4.1'),
+    ('1.4.0', '1.4.0'),
+    ('1.3.9', '1.3.9'),
+    ('1.3.8', '1.3.8'),
+    ('1.3.7', '1.3.7'),
+    ('1.3.6', '1.3.6'),
+    ('1.3.5', '1.3.5'),
+    ('1.3.4', '1.3.4'),
+    ('1.3.3', '1.3.3'),
+]
+
 
 class GenerateForm(forms.Form):
     sh_secret_field = forms.CharField(required=False)
+    ui_mode = forms.BooleanField(initial=True, required=False)
+
     #Platform
     platform = forms.ChoiceField(choices=[('windows','Windows 64Bit'),('windows-x86','Windows 32Bit'),('linux','Linux'),('android','Android'),('macos','macOS')], initial='windows')
-    version = forms.ChoiceField(choices=[('master','nightly'),('1.4.7','1.4.7'),('1.4.6','1.4.6'),('1.4.5','1.4.5'),('1.4.4','1.4.4'),('1.4.3','1.4.3'),('1.4.2','1.4.2'),('1.4.1','1.4.1'),('1.4.0','1.4.0'),('1.3.9','1.3.9'),('1.3.8','1.3.8'),('1.3.7','1.3.7'),('1.3.6','1.3.6'),('1.3.5','1.3.5'),('1.3.4','1.3.4'),('1.3.3','1.3.3')], initial='1.4.7')
+    version = forms.ChoiceField(choices=RUSTDESK_VERSIONS, initial='1.4.9')
     help_text="'master' is the development version (nightly build) with the latest features but may be less stable"
     delayFix = forms.BooleanField(initial=True, required=False)
 
     #General
-    exename = forms.CharField(label="Name for EXE file", required=True)
-    appname = forms.CharField(label="Custom App Name", required=False)
+    exename = forms.CharField(label="Name for EXE file", required=True, validators=[SAFE_NAME])
+    appname = forms.CharField(label="Custom App Name", required=False, validators=[SAFE_NAME])
     direction = forms.ChoiceField(widget=forms.RadioSelect, choices=[
         ('incoming', 'Incoming Only'),
         ('outgoing', 'Outgoing Only'),
@@ -25,15 +73,17 @@ class GenerateForm(forms.Form):
         ('settingsY', 'No, enable settings'),
         ('settingsN', 'Yes, DISABLE settings')
     ], initial='settingsY')
-    androidappid = forms.CharField(label="Custom Android App ID (replaces 'com.carriez.flutter_hbb')", required=False)
+    androidappid = forms.CharField(label="Custom Android App ID (replaces 'com.carriez.flutter_hbb')", required=False, validators=[ANDROID_APP_ID])
 
     #Custom Server
-    serverIP = forms.CharField(label="Host", required=False)
-    apiServer = forms.CharField(label="API Server", required=False)
-    key = forms.CharField(label="Key", required=False)
-    urlLink = forms.CharField(label="Custom URL for links", required=False)
-    downloadLink = forms.CharField(label="Custom URL for downloading new versions", required=False)
-    compname = forms.CharField(label="Company name",required=False)
+    serverIP = forms.CharField(label="Host", required=False, validators=[SAFE_HOST])
+    apiServer = forms.URLField(label="API Server", required=False)
+    key = forms.CharField(label="Key", required=False, validators=[BASE64_PUBLIC_KEY])
+    RS_PUB_KEY = forms.CharField(label="Key (JSON alias)", required=False, validators=[BASE64_PUBLIC_KEY])
+    urlLink = forms.URLField(label="Custom URL for links", required=False)
+    downloadLink = forms.URLField(label="Custom URL for downloading new versions", required=False)
+    updateLink = forms.URLField(label="Custom update URL", required=False)
+    compname = forms.CharField(label="Company name", required=False, validators=[SAFE_COMPANY])
 
     #Visual
     iconfile = forms.FileField(label="Custom App Icon (in .png format)", required=False, widget=forms.FileInput(attrs={'accept': 'image/png'}))
@@ -42,6 +92,7 @@ class GenerateForm(forms.Form):
     iconbase64 = forms.CharField(required=False)
     logobase64 = forms.CharField(required=False)
     privacybase64 = forms.CharField(required=False)
+    privacy_wallpaper = forms.CharField(required=False)
     theme = forms.ChoiceField(choices=[
         ('light', 'Light'),
         ('dark', 'Dark'),
@@ -52,14 +103,29 @@ class GenerateForm(forms.Form):
     #Security
     passApproveMode = forms.ChoiceField(choices=[('password','Accept sessions via password'),('click','Accept sessions via click'),('password-click','Accepts sessions via both')],initial='password-click')
     permanentPassword = forms.CharField(widget=forms.PasswordInput(), required=False)
+    unlockPin = forms.CharField(widget=forms.PasswordInput(), required=False)
     #runasadmin = forms.ChoiceField(choices=[('false','No'),('true','Yes')], initial='false')
     denyLan = forms.BooleanField(initial=False, required=False)
     enableDirectIP = forms.BooleanField(initial=False, required=False)
     #ipWhitelist = forms.BooleanField(initial=False, required=False)
     autoClose = forms.BooleanField(initial=False, required=False)
+    remove_preset_password_warning = forms.BooleanField(initial=False, required=False)
+    hideSecuritySettings = forms.BooleanField(initial=False, required=False)
+    hideNetworkSettings = forms.BooleanField(initial=False, required=False)
+    hideServerSettings = forms.BooleanField(initial=False, required=False)
+    hideRemotePrinterSettings = forms.BooleanField(initial=False, required=False)
+    hideProxySettings = forms.BooleanField(initial=False, required=False)
+    hideWebsocketSettings = forms.BooleanField(initial=False, required=False)
+    allowHostnameAsId = forms.BooleanField(initial=False, required=False)
+    hide_powered_by_me = forms.BooleanField(initial=False, required=False)
+    hide_username_on_card = forms.BooleanField(initial=False, required=False)
+    hide_account = forms.BooleanField(initial=False, required=False)
+    hideTray = forms.BooleanField(initial=False, required=False)
+    hidePassword = forms.BooleanField(initial=False, required=False)
+    hideService_Start_Stop = forms.BooleanField(initial=False, required=False)
 
     #Permissions
-    permissionsDorO = forms.ChoiceField(choices=[('default', 'Default'),('override', 'Override')], initial='default')
+    permissionsDorO = forms.ChoiceField(choices=[('default', 'Default'),('override', 'Override')], initial='default', required=False)
     permissionsType = forms.ChoiceField(choices=[('custom', 'Custom'),('full', 'Full Access'),('view','Screen share')], initial='custom')
     enableKeyboard =  forms.BooleanField(initial=True, required=False)
     enableClipboard = forms.BooleanField(initial=True, required=False)
@@ -74,9 +140,33 @@ class GenerateForm(forms.Form):
     enablePrinter = forms.BooleanField(initial=True, required=False)
     enableCamera = forms.BooleanField(initial=True, required=False)
     enableTerminal = forms.BooleanField(initial=True, required=False)
+    allow_numeric_one_time_password = forms.BooleanField(initial=False, required=False)
+    enable_file_copy_paste = forms.BooleanField(initial=False, required=False)
 
     #Other
     removeWallpaper = forms.BooleanField(initial=True, required=False)
+    disable_check_update = forms.BooleanField(initial=False, required=False)
+    enable_udp_punch = forms.BooleanField(initial=False, required=False)
+    enable_ipv6_punch = forms.BooleanField(initial=False, required=False)
+    allowD3dRender = forms.BooleanField(initial=False, required=False)
+    use_texture_render = forms.BooleanField(initial=False, required=False)
+    pre_elevate_service = forms.BooleanField(initial=False, required=False)
+    sync_init_clipboard = forms.BooleanField(initial=False, required=False)
+    collapse_toolbar = forms.BooleanField(initial=False, required=False)
+    privacy_mode = forms.BooleanField(initial=False, required=False)
+    viewOnly = forms.BooleanField(initial=False, required=False)
+    image_quality = forms.ChoiceField(
+        choices=[
+            ('balanced', 'Balanced'),
+            ('low', 'Optimize reaction time'),
+            ('best', 'Best image quality'),
+            ('custom', 'Custom'),
+        ],
+        initial='balanced',
+        required=False,
+    )
+    custom_fps = forms.IntegerField(initial=30, min_value=5, max_value=120, required=False)
+    view_style = forms.CharField(required=False)
 
     defaultManual = forms.CharField(widget=forms.Textarea, required=False)
     overrideManual = forms.CharField(widget=forms.Textarea, required=False)
@@ -85,6 +175,15 @@ class GenerateForm(forms.Form):
     cycleMonitor = forms.BooleanField(initial=False, required=False)
     xOffline = forms.BooleanField(initial=False, required=False)
     removeNewVersionNotif = forms.BooleanField(initial=False, required=False)
+    hide_chat_voice = forms.BooleanField(initial=False, required=False)
+    hide_sensitive_ui = forms.BooleanField(initial=False, required=False)
+    hideMenuBar = forms.BooleanField(initial=False, required=False)
+    hideQuit = forms.BooleanField(initial=False, required=False)
+    addcopy = forms.BooleanField(initial=False, required=False)
+    applyprivacy = forms.BooleanField(initial=False, required=False)
+    passpolicy = forms.BooleanField(initial=False, required=False)
+    no_uninstall = forms.BooleanField(initial=False, required=False)
+    disable_install = forms.BooleanField(initial=False, required=False)
 
     def clean_iconfile(self):
         print("checking icon")

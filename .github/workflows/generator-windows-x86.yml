@@ -13,6 +13,16 @@ on:
         required: true
         default: ''
         type: string
+      source_repository:
+        description: 'RustDesk source repository (owner/name)'
+        required: true
+        default: 'rustdesk/rustdesk'
+        type: string
+      source_ref:
+        description: 'RustDesk source branch, tag, or commit'
+        required: true
+        default: 'master'
+        type: string
 
 env:
   SCITER_RUST_VERSION: "1.75" # https://github.com/rustdesk/rustdesk/discussions/7503, also 1.78 has ABI change which causes our sciter version not working, https://blog.rust-lang.org/2024/03/30/i128-layout-update.html
@@ -111,18 +121,10 @@ jobs:
           echo "STATUS_URL=${{ env.apiServer }}/api/updategh" >> $env:GITHUB_ENV
 
       - name: Checkout source code
-        if: ${{ env.VERSION != 'master' }}
         uses: actions/checkout@v4
         with:
-          repository: rustdesk/rustdesk
-          ref: refs/tags/${{ env.VERSION }}
-          submodules: recursive
-
-      - name: Checkout source code
-        if: ${{ env.VERSION == 'master' }}
-        uses: actions/checkout@v4
-        with:
-          repository: rustdesk/rustdesk
+          repository: ${{ inputs.source_repository }}
+          ref: ${{ inputs.source_ref }}
           submodules: recursive
 
       - name: Install ImageMagick on Windows
