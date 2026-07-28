@@ -55,6 +55,9 @@ Windows builds use an outbound-only transfer flow:
    uploads the EXE/MSI as an Actions Artifact named `rdgen-<build-uuid>`.
 3. `python manage.py poll_github_artifacts` polls active workflow runs and
    downloads the matching artifact into `ARTIFACT_ROOT`.
+4. After the EXE/MSI files are safely stored, the poller immediately deletes
+   the GitHub Actions Artifact. A failed delete remains in cleanup status and
+   is retried on the next polling cycle without downloading the files again.
 
 The generator host therefore does not need a public callback address. Its
 fine-grained GitHub token needs repository permissions `Actions: read and
