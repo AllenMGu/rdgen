@@ -8,7 +8,12 @@ from django.test import RequestFactory, SimpleTestCase, override_settings
 
 from .custom_config import build_custom_config
 from .forms import GenerateForm
-from .views import _generator_form, _safe_artifact_name, _server_public_key
+from .views import (
+    _apply_default_permanent_password,
+    _generator_form,
+    _safe_artifact_name,
+    _server_public_key,
+)
 
 
 REQUESTED_FIELDS = {
@@ -143,6 +148,23 @@ class GenerateFormTests(SimpleTestCase):
         read_text.return_value = "S2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s="
         self.assertEqual(read_text.return_value, _server_public_key())
 
+    @override_settings(DEFAULT_PERMANENT_PASSWORD="server-side-example")
+    def test_uses_server_default_when_payload_password_is_empty(self):
+        cleaned_data = _apply_default_permanent_password(
+            {"permanentPassword": ""}
+        )
+        self.assertEqual(
+            "server-side-example",
+            cleaned_data["permanentPassword"],
+        )
+
+    @override_settings(DEFAULT_PERMANENT_PASSWORD="server-side-example")
+    def test_payload_password_overrides_server_default(self):
+        cleaned_data = _apply_default_permanent_password(
+            {"permanentPassword": "request-example"}
+        )
+        self.assertEqual("request-example", cleaned_data["permanentPassword"])
+
 
 class CustomConfigTests(SimpleTestCase):
     def test_maps_requested_options_to_rustdesk_schema(self):
@@ -241,6 +263,20 @@ class ArtifactStorageTests(SimpleTestCase):
 
             listing = self.client.get(f"/artifacts?build={self.build_id}")
             self.assertContains(listing, "client.exe")
+
+            json_listing = self.client.get(
+                f"/artifacts?build={self.build_id}&format=json"
+            )
+            self.assertEqual(200, json_listing.status_code)
+            payload = json_listing.json()
+            self.assertEqual("client.exe", payload["builds"][0]["artifacts"][0]["name"])
+            self.assertEqual(
+                (
+                    f"/api/admin/rdgen/download?uuid={self.build_id}"
+                    "&filename=client.exe"
+                ),
+                payload["builds"][0]["artifacts"][0]["download_url"],
+            )
 
             download = self.client.get(
                 f"/download?uuid={self.build_id}&filename=client.exe"

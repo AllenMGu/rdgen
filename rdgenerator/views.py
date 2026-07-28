@@ -100,6 +100,26 @@ def _artifact_entries(build_id):
     return sorted(entries, key=lambda entry: entry["name"].lower())
 
 
+def _wants_json(request):
+    return (
+        request.GET.get("format") == "json"
+        or "application/json" in request.headers.get("Accept", "")
+    )
+
+
+def _artifact_payload(build_id):
+    return [
+        {
+            **entry,
+            "download_url": (
+                f"/api/admin/rdgen/download?uuid={build_id}"
+                f"&filename={entry['name']}"
+            ),
+        }
+        for entry in _artifact_entries(build_id)
+    ]
+
+
 def _authorized_upload(request):
     expected = _settings.UPLOAD_TOKEN
     scheme, separator, supplied = request.headers.get("Authorization", "").partition(" ")
@@ -182,6 +202,15 @@ def _server_public_key():
     return key if len(decoded_key) == 32 else ""
 
 
+def _apply_default_permanent_password(cleaned_data):
+    if (
+        not cleaned_data.get("permanentPassword")
+        and _settings.DEFAULT_PERMANENT_PASSWORD
+    ):
+        cleaned_data["permanentPassword"] = _settings.DEFAULT_PERMANENT_PASSWORD
+    return cleaned_data
+
+
 def generator_view(request):
     if request.method == 'POST':
         form, is_json = _generator_form(request)
@@ -189,7 +218,7 @@ def generator_view(request):
             return JsonResponse({"error": "Request body must be a JSON object"}, status=400)
 
         if form.is_valid():
-            cleaned_data = form.cleaned_data
+            cleaned_data = _apply_default_permanent_password(form.cleaned_data)
             user_secret = cleaned_data['sh_secret_field']
             selfhosted = bool(user_secret) and secrets.compare_digest(
                 _settings.SH_SECRET, user_secret
@@ -447,6 +476,20 @@ def check_for_file(request):
         except Exception as e:
             print(f"Error checking GitHub: {e}")
     
+    if _wants_json(request):
+        return JsonResponse(
+            {
+                "uuid": str(gh_run.uuid),
+                "status": gh_run.status,
+                "log_url": github_log_url,
+                "artifacts": (
+                    _artifact_payload(str(gh_run.uuid))
+                    if gh_run.status == "success"
+                    else []
+                ),
+            }
+        )
+
     if gh_run.status == "success":
         return render(request, 'generated.html', {
             'filename': filename,
@@ -518,11 +561,13 @@ def artifacts(request):
         builds.append(
             {
                 "uuid": build_id,
-                "artifacts": entries,
+                "artifacts": _artifact_payload(build_id),
                 "modified": max(entry["modified"] for entry in entries),
             }
         )
     builds.sort(key=lambda build: build["modified"], reverse=True)
+    if _wants_json(request):
+        return JsonResponse({"builds": builds})
     return render(request, "artifacts.html", {"builds": builds})
 
 def get_png(request):
