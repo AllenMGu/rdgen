@@ -47,9 +47,19 @@ when the JSON field is empty.
 
 ## Stored build artifacts
 
-Set a long random `UPLOAD_TOKEN` in the rdgen environment. The encrypted build
-input passes this token to GitHub Actions, which uses it only to authenticate
-artifact uploads and encrypted-input cleanup callbacks.
+Windows builds use an outbound-only transfer flow:
+
+1. rdgen uploads the encrypted build input as an unreferenced Git blob and
+   dispatches GitHub Actions with the blob SHA.
+2. GitHub Actions downloads and decrypts that blob, compiles the client, and
+   uploads the EXE/MSI as an Actions Artifact named `rdgen-<build-uuid>`.
+3. `python manage.py poll_github_artifacts` polls active workflow runs and
+   downloads the matching artifact into `ARTIFACT_ROOT`.
+
+The generator host therefore does not need a public callback address. Its
+fine-grained GitHub token needs repository permissions `Actions: read and
+write` and `Contents: read and write`. The Actions permission dispatches and
+polls runs; the Contents permission creates the encrypted input blob.
 
 Completed clients are stored below `ARTIFACT_ROOT` (default: `./exe`) using
 this layout:
@@ -61,3 +71,7 @@ this layout:
 Open `/artifacts` to list and download every saved client. Files are streamed
 from disk and are not automatically deleted. Protect the generator and
 artifact pages with reverse-proxy authentication.
+
+Set `GITHUB_POLL_INTERVAL` to control polling frequency in seconds (default
+`60`, minimum effective interval `10`). The integrated S6 image runs this
+poller automatically.
