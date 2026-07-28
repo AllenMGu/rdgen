@@ -170,7 +170,7 @@ def _generator_form(request):
 
 def _workflow_url(platform, selfhosted):
     workflow = {
-        "windows": "sh-generator-windows.yml" if selfhosted else "generator-windows.yml",
+        "windows": "generator-windows.yml",
         "windows-x86": "generator-windows-x86.yml",
         "linux": "generator-linux.yml",
         "android": "generator-android.yml",
@@ -180,6 +180,28 @@ def _workflow_url(platform, selfhosted):
         f"https://api.github.com/repos/{_settings.GHUSER}/{_settings.REPONAME}"
         f"/actions/workflows/{workflow}/dispatches"
     )
+
+
+def _upload_input_blob(zip_path):
+    encoded = base64.b64encode(Path(zip_path).read_bytes()).decode("ascii")
+    response = requests.post(
+        (
+            f"https://api.github.com/repos/{_settings.GHUSER}/"
+            f"{_settings.REPONAME}/git/blobs"
+        ),
+        json={"content": encoded, "encoding": "base64"},
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {_settings.GHBEARER}",
+            "X-GitHub-Api-Version": "2026-03-10",
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    blob_sha = response.json().get("sha")
+    if not blob_sha or not re.fullmatch(r"[0-9a-f]{40,64}", blob_sha):
+        raise ValueError("GitHub did not return a valid input blob SHA")
+    return blob_sha
 
 
 def _source_ref(version):
@@ -224,6 +246,15 @@ def generator_view(request):
                 _settings.SH_SECRET, user_secret
             )
             platform = cleaned_data['platform']
+            if platform not in {"windows", "windows-x86"}:
+                message = (
+                    "The S6 artifact-pull workflow currently supports "
+                    "Windows EXE/MSI builds only."
+                )
+                if is_json:
+                    return JsonResponse({"error": message}, status=400)
+                form.add_error("platform", message)
+                return render(request, "generator.html", {"form": form}, status=400)
             version = cleaned_data['version']
             server = cleaned_data['serverIP']
             key = cleaned_data['RS_PUB_KEY'] or cleaned_data['key']
@@ -346,7 +377,6 @@ def generator_view(request):
                 "filename":filename,
                 "source_repository": _settings.RUSTDESK_REPOSITORY,
                 "source_ref": _source_ref(version),
-                "upload_token": _settings.UPLOAD_TOKEN,
             }
             for field in PASSTHROUGH_FIELDS:
                 value = cleaned_data.get(field)
@@ -371,6 +401,11 @@ def generator_view(request):
                 ) as zf:
                     zf.setpassword(_settings.ZIP_PASSWORD.encode())
                     zf.write(temp_json_path, arcname="secrets.json")
+                    asset_directory = Path("png") / myuuid
+                    for asset_name in ("icon.png", "logo.png", "privacy.png"):
+                        asset_path = asset_directory / asset_name
+                        if asset_path.is_file():
+                            zf.write(asset_path, arcname=f"assets/{asset_name}")
             except Exception:
                 Path(zip_path).unlink(missing_ok=True)
                 return JsonResponse(
@@ -380,17 +415,21 @@ def generator_view(request):
             finally:
                 Path(temp_json_path).unlink(missing_ok=True)
 
-            zipJson = {}
-            zipJson['url'] = full_url
-            zipJson['file'] = zip_filename
-
-            zip_url = json.dumps(zipJson)
+            try:
+                input_blob_sha = _upload_input_blob(zip_path)
+            except (OSError, ValueError, requests.RequestException) as exc:
+                Path(zip_path).unlink(missing_ok=True)
+                return JsonResponse(
+                    {"error": f"Failed to upload encrypted build inputs: {exc}"},
+                    status=502,
+                )
 
             data = {
                 "ref":_settings.GHBRANCH,
                 "inputs":{
                     "version":version,
-                    "zip_url":zip_url,
+                    "input_blob_sha": input_blob_sha,
+                    "build_uuid": myuuid,
                     "source_repository": _settings.RUSTDESK_REPOSITORY,
                     "source_ref": _source_ref(version),
                 },
@@ -420,6 +459,7 @@ def generator_view(request):
                         )
                     new_github_run.status = "in_progress"
                     new_github_run.save()
+                    Path(zip_path).unlink(missing_ok=True)
 
                     if is_json:
                         return JsonResponse(
@@ -458,24 +498,6 @@ def check_for_file(request):
     gh_run = get_object_or_404(GithubRun, uuid=uuid)
     github_log_url = f"https://github.com/{_settings.GHUSER}/{_settings.REPONAME}/actions/runs/{gh_run.github_run_id}"
 
-    if gh_run.status not in ['success', 'failure', 'cancelled', 'timed_out', 'skipped']:
-        headers = {
-            "Authorization": f"Bearer {_settings.GHBEARER}",
-            "Accept": "application/vnd.github+json"
-        }
-        api_url = f"https://api.github.com/repos/{_settings.GHUSER}/{_settings.REPONAME}/actions/runs/{gh_run.github_run_id}"
-        
-        try:
-            gh_response = requests.get(api_url, headers=headers)
-            if gh_response.status_code == 200:
-                gh_data = gh_response.json()
-                
-                if gh_data['status'] == 'completed':
-                    gh_run.status = gh_data['conclusion']
-                    gh_run.save()
-        except Exception as e:
-            print(f"Error checking GitHub: {e}")
-    
     if _wants_json(request):
         return JsonResponse(
             {
@@ -498,7 +520,15 @@ def check_for_file(request):
             'artifacts': _artifact_entries(uuid),
         })
         
-    elif gh_run.status in ['failure', 'cancelled', 'timed_out', 'skipped', 'action_required']:
+    elif gh_run.status in [
+        'failure',
+        'cancelled',
+        'timed_out',
+        'skipped',
+        'action_required',
+        'neutral',
+        'stale',
+    ]:
         return render(request, 'failure.html', {
             'log_url': github_log_url, 
             'filename': filename, 
