@@ -27,6 +27,12 @@ runs:
             zf.setpassword('${{ inputs.zip_password }}'.encode())
             with zf.open('secrets.json') as f:
                 secrets = json.load(f)
+            for asset in ('icon.png', 'logo.png', 'privacy.png'):
+                member = f'assets/{asset}'
+                if member in zf.namelist():
+                    os.makedirs('assets', exist_ok=True)
+                    with zf.open(member) as source, open(member, 'wb') as target:
+                        target.write(source.read())
 
         with open(os.environ['GITHUB_ENV'], 'a') as env_file:
             for key, value in secrets.items():
