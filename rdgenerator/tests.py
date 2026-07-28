@@ -1,18 +1,23 @@
 import json
+import io
+import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import RequestFactory, SimpleTestCase, override_settings
+from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 
 from .custom_config import build_custom_config
 from .forms import GenerateForm
+from .github_artifacts import sync_github_run
+from .models import GithubRun
 from .views import (
     _apply_default_permanent_password,
     _generator_form,
     _safe_artifact_name,
     _server_public_key,
+    _upload_input_blob,
 )
 
 
@@ -287,3 +292,84 @@ class ArtifactStorageTests(SimpleTestCase):
     def test_rejects_unsafe_artifact_names(self):
         self.assertIsNone(_safe_artifact_name("../client.exe"))
         self.assertIsNone(_safe_artifact_name("client.txt"))
+
+
+class GitHubInputBlobTests(SimpleTestCase):
+    @override_settings(
+        GHUSER="AllenMGu",
+        REPONAME="rdgen",
+        GHBEARER="test-token",
+    )
+    @patch("rdgenerator.views.requests.post")
+    def test_uploads_encrypted_input_as_unreferenced_git_blob(self, post):
+        response = Mock()
+        response.json.return_value = {"sha": "a" * 40}
+        response.raise_for_status.return_value = None
+        post.return_value = response
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "secrets.zip"
+            path.write_bytes(b"encrypted")
+            self.assertEqual("a" * 40, _upload_input_blob(path))
+
+        request = post.call_args
+        self.assertTrue(request.kwargs["json"]["content"])
+        self.assertEqual("base64", request.kwargs["json"]["encoding"])
+        self.assertNotIn(b"encrypted", str(request.kwargs).encode())
+
+
+class GitHubArtifactPollingTests(TestCase):
+    build_id = "6b5d395f-2478-4ca9-8383-34c0057deab8"
+
+    @override_settings(
+        GHUSER="AllenMGu",
+        REPONAME="rdgen",
+        GHBEARER="test-token",
+    )
+    @patch("rdgenerator.github_artifacts.requests.get")
+    @patch("rdgenerator.github_artifacts._request_json")
+    def test_downloads_matching_run_artifact_to_build_directory(
+        self,
+        request_json,
+        get,
+    ):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as output:
+            output.writestr("CutiaRustDesk.exe", b"exe")
+            output.writestr("CutiaRustDesk.msi", b"msi")
+            output.writestr("ignored.txt", b"ignored")
+
+        response = Mock()
+        response.iter_content.return_value = [archive.getvalue()]
+        response.raise_for_status.return_value = None
+        get.return_value = response
+        request_json.side_effect = [
+            {"status": "completed", "conclusion": "success"},
+            {
+                "artifacts": [
+                    {
+                        "name": f"rdgen-{self.build_id}",
+                        "expired": False,
+                        "archive_download_url": "https://api.github.test/artifact.zip",
+                    }
+                ]
+            },
+        ]
+
+        github_run = GithubRun.objects.create(
+            id=1,
+            uuid=self.build_id,
+            status="in_progress",
+            github_run_id=12345,
+        )
+        with TemporaryDirectory() as artifact_root, override_settings(
+            ARTIFACT_ROOT=Path(artifact_root)
+        ):
+            self.assertTrue(sync_github_run(github_run))
+            destination = Path(artifact_root) / self.build_id
+            self.assertEqual(b"exe", (destination / "CutiaRustDesk.exe").read_bytes())
+            self.assertEqual(b"msi", (destination / "CutiaRustDesk.msi").read_bytes())
+            self.assertFalse((destination / "ignored.txt").exists())
+
+        github_run.refresh_from_db()
+        self.assertEqual("success", github_run.status)
