@@ -10,7 +10,7 @@ from django.test import RequestFactory, SimpleTestCase, TestCase, override_setti
 
 from .custom_config import build_custom_config
 from .forms import GenerateForm
-from .github_artifacts import sync_github_run
+from .github_artifacts import _delete_artifact, sync_github_run
 from .models import GithubRun
 from .views import (
     _apply_default_permanent_password,
@@ -326,12 +326,36 @@ class GitHubArtifactPollingTests(TestCase):
         REPONAME="rdgen",
         GHBEARER="test-token",
     )
+    @patch("rdgenerator.github_artifacts.requests.delete")
+    def test_deletes_artifact_through_the_github_api(self, delete):
+        response = Mock(status_code=204)
+        delete.return_value = response
+
+        _delete_artifact(98765)
+
+        delete.assert_called_once_with(
+            "https://api.github.com/repos/AllenMGu/rdgen/actions/artifacts/98765",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": "Bearer test-token",
+                "X-GitHub-Api-Version": "2026-03-10",
+            },
+            timeout=30,
+        )
+
+    @override_settings(
+        GHUSER="AllenMGu",
+        REPONAME="rdgen",
+        GHBEARER="test-token",
+    )
+    @patch("rdgenerator.github_artifacts._delete_artifact")
     @patch("rdgenerator.github_artifacts.requests.get")
     @patch("rdgenerator.github_artifacts._request_json")
     def test_downloads_matching_run_artifact_to_build_directory(
         self,
         request_json,
         get,
+        delete_artifact,
     ):
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w") as output:
@@ -348,6 +372,7 @@ class GitHubArtifactPollingTests(TestCase):
             {
                 "artifacts": [
                     {
+                        "id": 98765,
                         "name": f"rdgen-{self.build_id}",
                         "expired": False,
                         "archive_download_url": "https://api.github.test/artifact.zip",
@@ -373,3 +398,47 @@ class GitHubArtifactPollingTests(TestCase):
 
         github_run.refresh_from_db()
         self.assertEqual("success", github_run.status)
+        delete_artifact.assert_called_once_with(98765)
+
+    @override_settings(
+        GHUSER="AllenMGu",
+        REPONAME="rdgen",
+        GHBEARER="test-token",
+    )
+    @patch("rdgenerator.github_artifacts._delete_artifact")
+    @patch("rdgenerator.github_artifacts._request_json")
+    def test_retries_cleanup_without_downloading_the_artifact_again(
+        self,
+        request_json,
+        delete_artifact,
+    ):
+        request_json.return_value = {
+            "artifacts": [
+                {
+                    "id": 98765,
+                    "name": f"rdgen-{self.build_id}",
+                    "expired": False,
+                    "archive_download_url": "https://api.github.test/artifact.zip",
+                }
+            ]
+        }
+        github_run = GithubRun.objects.create(
+            id=2,
+            uuid=self.build_id,
+            status="deleting_artifact",
+            github_run_id=12345,
+        )
+        with TemporaryDirectory() as artifact_root, override_settings(
+            ARTIFACT_ROOT=Path(artifact_root)
+        ):
+            destination = Path(artifact_root) / self.build_id
+            destination.mkdir(parents=True)
+            (destination / "CutiaRustDesk.exe").write_bytes(b"exe")
+            self.assertTrue(sync_github_run(github_run))
+
+        github_run.refresh_from_db()
+        self.assertEqual("success", github_run.status)
+        delete_artifact.assert_called_once_with(98765)
+        request_json.assert_called_once_with(
+            f"/actions/runs/{github_run.github_run_id}/artifacts?per_page=100"
+        )
