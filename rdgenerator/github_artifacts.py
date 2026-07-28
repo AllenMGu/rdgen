@@ -67,6 +67,18 @@ def _request_json(path):
     return response.json()
 
 
+def _delete_artifact(artifact_id):
+    if not isinstance(artifact_id, int) or artifact_id <= 0:
+        raise ValueError("GitHub returned an invalid artifact ID")
+    response = requests.delete(
+        _api_url(f"/actions/artifacts/{artifact_id}"),
+        headers=_headers(),
+        timeout=30,
+    )
+    if response.status_code not in {204, 404}:
+        response.raise_for_status()
+
+
 def _download_artifact(archive_url, build_id):
     response = requests.get(
         archive_url,
@@ -114,25 +126,22 @@ def _download_artifact(archive_url, build_id):
 def sync_github_run(github_run):
     if not github_run.github_run_id:
         return False
-    if _has_downloaded_outputs(github_run.uuid):
-        if github_run.status != "success":
-            github_run.status = "success"
-            github_run.save(update_fields=["status"])
-        return True
+    outputs_downloaded = _has_downloaded_outputs(github_run.uuid)
 
-    run = _request_json(f"/actions/runs/{github_run.github_run_id}")
-    if run.get("status") != "completed":
-        status = run.get("status") or "in_progress"
-        if github_run.status != status:
-            github_run.status = status
-            github_run.save(update_fields=["status"])
-        return False
+    if not outputs_downloaded:
+        run = _request_json(f"/actions/runs/{github_run.github_run_id}")
+        if run.get("status") != "completed":
+            status = run.get("status") or "in_progress"
+            if github_run.status != status:
+                github_run.status = status
+                github_run.save(update_fields=["status"])
+            return False
 
-    conclusion = run.get("conclusion") or "failure"
-    if conclusion != "success":
-        github_run.status = conclusion
-        github_run.save(update_fields=["status"])
-        return False
+        conclusion = run.get("conclusion") or "failure"
+        if conclusion != "success":
+            github_run.status = conclusion
+            github_run.save(update_fields=["status"])
+            return False
 
     payload = _request_json(
         f"/actions/runs/{github_run.github_run_id}/artifacts?per_page=100"
@@ -146,6 +155,15 @@ def sync_github_run(github_run):
         ),
         None,
     )
+    if outputs_downloaded:
+        if artifact:
+            github_run.status = "deleting_artifact"
+            github_run.save(update_fields=["status"])
+            _delete_artifact(artifact.get("id"))
+        github_run.status = "success"
+        github_run.save(update_fields=["status"])
+        return True
+
     if not artifact:
         if github_run.status != "artifact_pending":
             github_run.status = "artifact_pending"
@@ -155,6 +173,9 @@ def sync_github_run(github_run):
     github_run.status = "downloading_artifacts"
     github_run.save(update_fields=["status"])
     _download_artifact(artifact["archive_download_url"], github_run.uuid)
+    github_run.status = "deleting_artifact"
+    github_run.save(update_fields=["status"])
+    _delete_artifact(artifact.get("id"))
     github_run.status = "success"
     github_run.save(update_fields=["status"])
     return True
