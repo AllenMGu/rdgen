@@ -38,6 +38,7 @@ RUSTDESK_PUBLIC_KEY_FILE = os.environ.get("RUSTDESK_PUBLIC_KEY_FILE", '')
 UPLOAD_TOKEN = os.environ.get("UPLOAD_TOKEN", '')
 ARTIFACT_ROOT = Path(os.environ.get("ARTIFACT_ROOT", BASE_DIR / 'exe'))
 SH_SECRET = os.environ.get('SH_SECRET', '')
+DEFAULT_PERMANENT_PASSWORD = os.environ.get('DEFAULT_PERMANENT_PASSWORD', '')
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
