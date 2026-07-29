@@ -568,3 +568,102 @@ class GitHubArtifactPollingTests(TestCase):
             )
 
         delete_artifact.assert_not_called()
+
+    @override_settings(
+        GHUSER="AllenMGu",
+        REPONAME="rdgen",
+        GHBEARER="test-token",
+    )
+    @patch("rdgenerator.github_artifacts._delete_artifact")
+    @patch("rdgenerator.github_artifacts.requests.get")
+    @patch("rdgenerator.github_artifacts._request_json")
+    def test_does_not_delete_a_corrupt_artifact(
+        self,
+        request_json,
+        get,
+        delete_artifact,
+    ):
+        response = Mock()
+        response.iter_content.return_value = [b"not-a-zip"]
+        response.raise_for_status.return_value = None
+        get.return_value = response
+        request_json.side_effect = [
+            {"status": "completed", "conclusion": "success"},
+            {
+                "artifacts": [
+                    {
+                        "id": 98765,
+                        "name": f"rdgen-{self.build_id}",
+                        "expired": False,
+                        "archive_download_url": "https://api.github.test/artifact.zip",
+                    }
+                ]
+            },
+        ]
+        github_run = GithubRun.objects.create(
+            uuid=self.build_id,
+            status="in_progress",
+            github_run_id=12345,
+            platform="windows",
+            filename="CutiaRustDesk",
+        )
+
+        with TemporaryDirectory() as artifact_root, override_settings(
+            ARTIFACT_ROOT=Path(artifact_root)
+        ):
+            with self.assertRaisesRegex(ValueError, "not a valid ZIP archive"):
+                sync_github_run(github_run)
+
+        delete_artifact.assert_not_called()
+
+    @override_settings(
+        GHUSER="AllenMGu",
+        REPONAME="rdgen",
+        GHBEARER="test-token",
+    )
+    @patch("rdgenerator.github_artifacts._delete_artifact")
+    @patch("rdgenerator.github_artifacts.requests.get")
+    @patch("rdgenerator.github_artifacts._request_json")
+    def test_does_not_delete_empty_output_files(
+        self,
+        request_json,
+        get,
+        delete_artifact,
+    ):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as output:
+            output.writestr("CutiaRustDesk.exe", b"")
+            output.writestr("CutiaRustDesk.msi", b"msi")
+
+        response = Mock()
+        response.iter_content.return_value = [archive.getvalue()]
+        response.raise_for_status.return_value = None
+        get.return_value = response
+        request_json.side_effect = [
+            {"status": "completed", "conclusion": "success"},
+            {
+                "artifacts": [
+                    {
+                        "id": 98765,
+                        "name": f"rdgen-{self.build_id}",
+                        "expired": False,
+                        "archive_download_url": "https://api.github.test/artifact.zip",
+                    }
+                ]
+            },
+        ]
+        github_run = GithubRun.objects.create(
+            uuid=self.build_id,
+            status="in_progress",
+            github_run_id=12345,
+            platform="windows",
+            filename="CutiaRustDesk",
+        )
+
+        with TemporaryDirectory() as artifact_root, override_settings(
+            ARTIFACT_ROOT=Path(artifact_root)
+        ):
+            with self.assertRaisesRegex(ValueError, "empty output files"):
+                sync_github_run(github_run)
+
+        delete_artifact.assert_not_called()

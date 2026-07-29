@@ -75,6 +75,7 @@ def _has_downloaded_outputs(github_run):
     return all(
         (directory / name).is_file()
         and not (directory / name).is_symlink()
+        and (directory / name).stat().st_size > 0
         and _valid_output_name(name)
         for name in names
     )
@@ -138,24 +139,37 @@ def _download_artifact(archive_url, github_run):
                     target.write(chunk)
 
         saved = set()
-        with zipfile.ZipFile(archive_path) as archive:
-            for member in archive.infolist():
-                name = Path(member.filename).name
-                if member.is_dir() or not _valid_output_name(name):
-                    continue
-                if name in saved:
-                    raise ValueError(f"GitHub artifact contains duplicate output {name}")
-                output = staging / name
-                with archive.open(member) as source, output.open("wb") as target:
-                    while chunk := source.read(1024 * 1024):
-                        target.write(chunk)
-                saved.add(name)
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                for member in archive.infolist():
+                    name = Path(member.filename).name
+                    if member.is_dir() or not _valid_output_name(name):
+                        continue
+                    if name in saved:
+                        raise ValueError(
+                            f"GitHub artifact contains duplicate output {name}"
+                        )
+                    output = staging / name
+                    with archive.open(member) as source, output.open("wb") as target:
+                        while chunk := source.read(1024 * 1024):
+                            target.write(chunk)
+                    saved.add(name)
+        except (zipfile.BadZipFile, EOFError) as exc:
+            raise ValueError(
+                "GitHub artifact is not a valid ZIP archive"
+            ) from exc
 
         expected = _expected_output_names(github_run)
         missing = expected - saved
         if missing:
             raise ValueError(
                 "GitHub artifact is incomplete; missing " + ", ".join(sorted(missing))
+            )
+        empty = {name for name in expected if (staging / name).stat().st_size == 0}
+        if empty:
+            raise ValueError(
+                "GitHub artifact contains empty output files: "
+                + ", ".join(sorted(empty))
             )
 
         destination.mkdir(parents=True, exist_ok=True)
@@ -200,6 +214,8 @@ def sync_github_run(github_run):
     artifacts = payload.get("artifacts", [])
     if not isinstance(artifacts, list):
         raise ValueError("GitHub returned an invalid artifact list")
+    if any(not isinstance(item, dict) for item in artifacts):
+        raise ValueError("GitHub returned an invalid artifact record")
     artifact = next(
         (
             item
