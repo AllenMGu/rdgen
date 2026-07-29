@@ -1,6 +1,7 @@
 import io
 from pathlib import Path
 import binascii
+import logging
 import mimetypes
 from django.http import FileResponse, HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import get_object_or_404, render
@@ -11,6 +12,7 @@ import re
 import requests
 import base64
 import json
+import shutil
 import uuid
 import pyzipper
 from django.conf import settings as _settings
@@ -20,6 +22,8 @@ from .forms import GenerateForm
 from .models import GithubRun
 from PIL import Image
 
+
+logger = logging.getLogger(__name__)
 
 PASSTHROUGH_FIELDS = (
     "ui_mode",
@@ -384,10 +388,11 @@ def generator_view(request):
                     value = "true" if value else "false"
                 inputs_raw[field] = "" if value is None else str(value)
 
-            temp_json_path = f"data_{uuid.uuid4()}.json"
+            temporary_directory = Path("temp_zips")
+            temp_json_path = temporary_directory / f"data_{uuid.uuid4()}.json"
             zip_filename = f"secrets_{myuuid}.zip"
-            zip_path = "temp_zips/%s" % (zip_filename)
-            Path("temp_zips").mkdir(parents=True, exist_ok=True)
+            zip_path = temporary_directory / zip_filename
+            temporary_directory.mkdir(parents=True, exist_ok=True)
 
             try:
                 with open(temp_json_path, "w") as f:
@@ -407,6 +412,7 @@ def generator_view(request):
                         if asset_path.is_file():
                             zf.write(asset_path, arcname=f"assets/{asset_name}")
             except Exception:
+                logger.exception("Failed to prepare encrypted build inputs")
                 Path(zip_path).unlink(missing_ok=True)
                 return JsonResponse(
                     {"error": "Failed to prepare encrypted build inputs"},
@@ -444,7 +450,9 @@ def generator_view(request):
             }
             new_github_run = GithubRun(
                 uuid=myuuid,
-                status="Starting generator...please wait"
+                status="Starting generator...please wait",
+                platform=platform,
+                filename=filename,
             )
             try:
                 response = requests.post(url, json=data, headers=headers)
@@ -504,6 +512,8 @@ def check_for_file(request):
                 "uuid": str(gh_run.uuid),
                 "status": gh_run.status,
                 "log_url": github_log_url,
+                "poll_failures": gh_run.poll_failures,
+                "last_error": gh_run.last_error,
                 "artifacts": (
                     _artifact_payload(str(gh_run.uuid))
                     if gh_run.status == "success"
@@ -600,18 +610,33 @@ def artifacts(request):
         return JsonResponse({"builds": builds})
     return render(request, "artifacts.html", {"builds": builds})
 
-def get_png(request):
-    filename = request.GET['filename']
-    uuid = request.GET['uuid']
-    #filename = filename+".exe"
-    file_path = os.path.join('png',uuid,filename)
-    with open(file_path, 'rb') as file:
-        response = HttpResponse(file, headers={
-            'Content-Type': 'application/vnd.microsoft.portable-executable',
-            'Content-Disposition': f'attachment; filename="{filename}"'
-        })
 
-    return response
+def delete_artifact_build(request):
+    if request.method != "DELETE":
+        return HttpResponseNotAllowed(["DELETE"])
+    build_id = _normalize_build_id(request.GET.get("uuid"))
+    if not build_id:
+        return JsonResponse({"error": "Invalid build ID"}, status=400)
+    directory = _artifact_directory(build_id)
+    if not directory.is_dir() or directory.is_symlink():
+        return JsonResponse({"error": "Artifact not found"}, status=404)
+    shutil.rmtree(directory)
+    return HttpResponse(status=204)
+
+
+def get_png(request):
+    build_id = _normalize_build_id(request.GET.get("uuid"))
+    filename = request.GET.get("filename")
+    if not build_id or filename not in {"icon.png", "logo.png", "privacy.png"}:
+        return JsonResponse({"error": "Invalid image path"}, status=400)
+    file_path = Path("png") / build_id / filename
+    if not file_path.is_file() or file_path.is_symlink():
+        return JsonResponse({"error": "Image not found"}, status=404)
+    return FileResponse(
+        file_path.open("rb"),
+        filename=filename,
+        content_type="image/png",
+    )
 
 def create_github_run(myuuid):
     new_github_run = GithubRun(
@@ -621,9 +646,18 @@ def create_github_run(myuuid):
     new_github_run.save()
 
 def update_github_run(request):
-    data = json.loads(request.body)
-    myuuid = data.get('uuid')
-    mystatus = data.get('status')
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+    if not _authorized_upload(request):
+        return JsonResponse({"error": "Invalid upload token"}, status=401)
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+    myuuid = _normalize_build_id(data.get("uuid"))
+    mystatus = str(data.get("status") or "")
+    if not myuuid or not mystatus or len(mystatus) > 100:
+        return JsonResponse({"error": "Invalid build status"}, status=400)
     GithubRun.objects.filter(Q(uuid=myuuid)).update(status=mystatus)
     return HttpResponse('')
 

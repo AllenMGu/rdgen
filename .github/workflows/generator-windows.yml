@@ -29,6 +29,10 @@ on:
         default: 'master'
         type: string
 
+permissions:
+  actions: write
+  contents: read
+
 
 env:
   SCITER_RUST_VERSION: "1.75" # https://github.com/rustdesk/rustdesk/discussions/7503, also 1.78 has ABI change which causes our sciter version not working, https://blog.rust-lang.org/2024/03/30/i128-layout-update.html
@@ -130,8 +134,15 @@ jobs:
           ref: ${{ inputs.source_ref }}
           submodules: recursive
 
+      - name: Checkout generator patches
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: .rdgen-workflow
+
       - name: Restore bridge files
-        uses: actions/download-artifact@master
+        uses: actions/download-artifact@v4
         with:
           name: bridge-artifact
           path: ./
@@ -251,11 +262,9 @@ jobs:
           max_attempts: 3
           shell: pwsh
           command: |
-            Invoke-WebRequest -Uri https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/allowCustom.py -OutFile allowCustom.py
-            python allowCustom.py
+            python .rdgen-workflow/.github/patches/allowCustom.py
             # Remove Setup Server Tip
-            Invoke-WebRequest -Uri https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/removeSetupServerTip.diff -OutFile removeSetupServerTip.diff
-            git apply removeSetupServerTip.diff
+            git apply .rdgen-workflow/.github/patches/removeSetupServerTip.diff
 
       - name: Install LLVM and Clang
         uses: KyleMayes/install-llvm-action@v1
@@ -369,8 +378,7 @@ jobs:
           shell: pwsh
           continue_on_error: true
           command: |
-            Invoke-WebRequest -Uri https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/cycle_monitor.diff -OutFile cycle_monitor.diff
-            git apply cycle_monitor.diff
+            git apply .rdgen-workflow/.github/patches/cycle_monitor.diff
 
       - name: use X for offline display instead of orange circle
         if: env.xOffline == 'true'
@@ -381,8 +389,7 @@ jobs:
           shell: pwsh
           continue_on_error: true
           command: |
-            Invoke-WebRequest -Uri https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/xoffline.diff -OutFile xoffline.diff
-            git apply xoffline.diff
+            git apply .rdgen-workflow/.github/patches/xoffline.diff
 
       - name: removeNewVersionNotif
         continue-on-error: true
@@ -483,7 +490,7 @@ jobs:
           fi
 
       - name: Download RustDeskTempTopMostWindow artifacts
-        uses: actions/download-artifact@master
+        uses: actions/download-artifact@v4
         if: env.UPLOAD_ARTIFACT == 'true'
         with:
           name: topmostwindow-artifacts
@@ -585,9 +592,21 @@ jobs:
           mv ./SignOutput/rustdesk.exe "./SignOutput/${{ env.filename }}.exe" || echo "rustdesk"
 
       - name: rename rustdesk.msi to filename.msi
-        continue-on-error: true
         run: |
           mv ./SignOutput/rustdesk.msi "./SignOutput/${{ env.filename }}.msi" || echo "rustdesk"
+
+      - name: Verify final EXE and MSI
+        shell: pwsh
+        run: |
+          $expected = @(
+            "./SignOutput/${{ env.filename }}.exe",
+            "./SignOutput/${{ env.filename }}.msi"
+          )
+          foreach ($path in $expected) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Required build output is missing: $path"
+            }
+          }
 
       - name: Upload EXE and MSI artifact
         uses: actions/upload-artifact@v4
@@ -605,7 +624,16 @@ jobs:
     continue-on-error: true
     if: always()
     steps:
-      - name: Delete secrets artifact
-        uses: geekyeggo/delete-artifact@v5
-        with:
-          name: encrypted-secrets-zip
+      - name: Delete temporary build artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for name in encrypted-secrets-zip bridge-artifact topmostwindow-artifacts; do
+            gh api --paginate \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+              --jq ".artifacts[] | select(.name == \"${name}\") | .id" |
+              while read -r artifact_id; do
+                gh api --method DELETE \
+                  "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+              done
+          done

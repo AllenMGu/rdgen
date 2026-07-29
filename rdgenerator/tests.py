@@ -1,16 +1,19 @@
 import json
 import io
 import zipfile
+from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
+from django.utils import timezone
 
 from .custom_config import build_custom_config
 from .forms import GenerateForm
-from .github_artifacts import _delete_artifact, sync_github_run
+from .github_artifacts import COMPLETION_MARKER, _delete_artifact, sync_github_run
 from .models import GithubRun
 from .views import (
     _apply_default_permanent_password,
@@ -293,6 +296,29 @@ class ArtifactStorageTests(SimpleTestCase):
         self.assertIsNone(_safe_artifact_name("../client.exe"))
         self.assertIsNone(_safe_artifact_name("client.txt"))
 
+    def test_rejects_image_path_traversal(self):
+        response = self.client.get(
+            "/get_png",
+            {
+                "uuid": self.build_id,
+                "filename": "/proc/self/environ",
+            },
+        )
+        self.assertEqual(400, response.status_code)
+
+    def test_admin_can_delete_a_saved_build_directory(self):
+        with TemporaryDirectory() as artifact_root, override_settings(
+            ARTIFACT_ROOT=Path(artifact_root),
+        ):
+            directory = Path(artifact_root) / self.build_id
+            directory.mkdir()
+            (directory / "client.exe").write_bytes(b"binary")
+            response = self.client.delete(
+                f"/delete_artifact_build?uuid={self.build_id}"
+            )
+            self.assertEqual(204, response.status_code)
+            self.assertFalse(directory.exists())
+
 
 class GitHubInputBlobTests(SimpleTestCase):
     @override_settings(
@@ -316,6 +342,31 @@ class GitHubInputBlobTests(SimpleTestCase):
         self.assertTrue(request.kwargs["json"]["content"])
         self.assertEqual("base64", request.kwargs["json"]["encoding"])
         self.assertNotIn(b"encrypted", str(request.kwargs).encode())
+
+
+class GitHubPollingCommandTests(TestCase):
+    @override_settings(GITHUB_BUILD_TIMEOUT=600, GITHUB_POLL_INTERVAL=10)
+    @patch(
+        "rdgenerator.management.commands.poll_github_artifacts.sync_github_run"
+    )
+    def test_marks_stale_build_as_timed_out_without_polling_github(self, sync):
+        github_run = GithubRun.objects.create(
+            uuid="8ddf9e50-12c5-44fd-8f45-158147beff23",
+            status="in_progress",
+            github_run_id=123,
+            platform="windows",
+            filename="client",
+        )
+        GithubRun.objects.filter(pk=github_run.pk).update(
+            created_at=timezone.now() - timedelta(minutes=11)
+        )
+
+        call_command("poll_github_artifacts", once=True)
+
+        github_run.refresh_from_db()
+        self.assertEqual("timed_out", github_run.status)
+        self.assertIn("polling timeout", github_run.last_error)
+        sync.assert_not_called()
 
 
 class GitHubArtifactPollingTests(TestCase):
@@ -372,6 +423,16 @@ class GitHubArtifactPollingTests(TestCase):
             {
                 "artifacts": [
                     {
+                        "id": 98763,
+                        "name": "bridge-artifact",
+                        "expired": False,
+                    },
+                    {
+                        "id": 98764,
+                        "name": "topmostwindow-artifacts",
+                        "expired": False,
+                    },
+                    {
                         "id": 98765,
                         "name": f"rdgen-{self.build_id}",
                         "expired": False,
@@ -386,6 +447,8 @@ class GitHubArtifactPollingTests(TestCase):
             uuid=self.build_id,
             status="in_progress",
             github_run_id=12345,
+            platform="windows",
+            filename="CutiaRustDesk",
         )
         with TemporaryDirectory() as artifact_root, override_settings(
             ARTIFACT_ROOT=Path(artifact_root)
@@ -398,7 +461,9 @@ class GitHubArtifactPollingTests(TestCase):
 
         github_run.refresh_from_db()
         self.assertEqual("success", github_run.status)
-        delete_artifact.assert_called_once_with(98765)
+        delete_artifact.assert_has_calls(
+            [call(98763), call(98764), call(98765)]
+        )
 
     @override_settings(
         GHUSER="AllenMGu",
@@ -427,6 +492,8 @@ class GitHubArtifactPollingTests(TestCase):
             uuid=self.build_id,
             status="deleting_artifact",
             github_run_id=12345,
+            platform="windows-x86",
+            filename="CutiaRustDesk",
         )
         with TemporaryDirectory() as artifact_root, override_settings(
             ARTIFACT_ROOT=Path(artifact_root)
@@ -434,6 +501,10 @@ class GitHubArtifactPollingTests(TestCase):
             destination = Path(artifact_root) / self.build_id
             destination.mkdir(parents=True)
             (destination / "CutiaRustDesk.exe").write_bytes(b"exe")
+            (destination / COMPLETION_MARKER).write_text(
+                json.dumps({"files": ["CutiaRustDesk.exe"]}),
+                encoding="utf-8",
+            )
             self.assertTrue(sync_github_run(github_run))
 
         github_run.refresh_from_db()
@@ -442,3 +513,58 @@ class GitHubArtifactPollingTests(TestCase):
         request_json.assert_called_once_with(
             f"/actions/runs/{github_run.github_run_id}/artifacts?per_page=100"
         )
+
+    @override_settings(
+        GHUSER="AllenMGu",
+        REPONAME="rdgen",
+        GHBEARER="test-token",
+    )
+    @patch("rdgenerator.github_artifacts._delete_artifact")
+    @patch("rdgenerator.github_artifacts.requests.get")
+    @patch("rdgenerator.github_artifacts._request_json")
+    def test_does_not_delete_an_incomplete_windows_artifact(
+        self,
+        request_json,
+        get,
+        delete_artifact,
+    ):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as output:
+            output.writestr("CutiaRustDesk.exe", b"exe")
+
+        response = Mock()
+        response.iter_content.return_value = [archive.getvalue()]
+        response.raise_for_status.return_value = None
+        get.return_value = response
+        request_json.side_effect = [
+            {"status": "completed", "conclusion": "success"},
+            {
+                "artifacts": [
+                    {
+                        "id": 98765,
+                        "name": f"rdgen-{self.build_id}",
+                        "expired": False,
+                        "archive_download_url": "https://api.github.test/artifact.zip",
+                    }
+                ]
+            },
+        ]
+
+        github_run = GithubRun.objects.create(
+            id=3,
+            uuid=self.build_id,
+            status="in_progress",
+            github_run_id=12345,
+            platform="windows",
+            filename="CutiaRustDesk",
+        )
+        with TemporaryDirectory() as artifact_root, override_settings(
+            ARTIFACT_ROOT=Path(artifact_root)
+        ):
+            with self.assertRaisesRegex(ValueError, "missing CutiaRustDesk.msi"):
+                sync_github_run(github_run)
+            self.assertFalse(
+                (Path(artifact_root) / self.build_id / COMPLETION_MARKER).exists()
+            )
+
+        delete_artifact.assert_not_called()

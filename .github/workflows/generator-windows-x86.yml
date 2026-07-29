@@ -29,6 +29,10 @@ on:
         default: 'master'
         type: string
 
+permissions:
+  actions: write
+  contents: read
+
 env:
   SCITER_RUST_VERSION: "1.75" # https://github.com/rustdesk/rustdesk/discussions/7503, also 1.78 has ABI change which causes our sciter version not working, https://blog.rust-lang.org/2024/03/30/i128-layout-update.html
   RUST_VERSION: "1.75" # sciter failed on m1 with 1.78 because of https://blog.rust-lang.org/2024/03/30/i128-layout-update.html
@@ -116,6 +120,13 @@ jobs:
           repository: ${{ inputs.source_repository }}
           ref: ${{ inputs.source_ref }}
           submodules: recursive
+
+      - name: Checkout generator patches
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: .rdgen-workflow
 
       - name: Install ImageMagick on Windows
         run: |
@@ -208,11 +219,10 @@ jobs:
           shell: pwsh
           continue_on_error: true
           command: |
-            Invoke-WebRequest -Uri https://raw.githubusercontent.com/bryangerlach/rdgen/refs/heads/master/.github/patches/allowCustom.diff -OutFile allowCustom.diff
-            git apply allowCustom.diff
+            git apply .rdgen-workflow/.github/patches/allowCustom.diff
 
       - name: Install LLVM and Clang
-        uses: rustdesk-org/install-llvm-action-32bit@master
+        uses: rustdesk-org/install-llvm-action-32bit@6aa7d9ad3df84dff01cd4596dd0fc880a7f47fce
         with:
           version: ${{ env.LLVM_VERSION }}
 
@@ -418,6 +428,14 @@ jobs:
         run: |
           mv ./SignOutput/rustdesk.exe "./SignOutput/${{ env.filename }}.exe" || echo "rustdesk"
 
+      - name: Verify final EXE
+        shell: pwsh
+        run: |
+          $path = "./SignOutput/${{ env.filename }}.exe"
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Required build output is missing: $path"
+          }
+
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
         with:
@@ -432,7 +450,16 @@ jobs:
     continue-on-error: true
     if: always()
     steps:
-      - name: Delete secrets artifact
-        uses: geekyeggo/delete-artifact@v5
-        with:
-          name: encrypted-secrets-zip
+      - name: Delete temporary build artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for name in encrypted-secrets-zip bridge-artifact topmostwindow-artifacts; do
+            gh api --paginate \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+              --jq ".artifacts[] | select(.name == \"${name}\") | .id" |
+              while read -r artifact_id; do
+                gh api --method DELETE \
+                  "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+              done
+          done

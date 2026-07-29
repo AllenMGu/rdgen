@@ -55,9 +55,11 @@ Windows builds use an outbound-only transfer flow:
    uploads the EXE/MSI as an Actions Artifact named `rdgen-<build-uuid>`.
 3. `python manage.py poll_github_artifacts` polls active workflow runs and
    downloads the matching artifact into `ARTIFACT_ROOT`.
-4. After the EXE/MSI files are safely stored, the poller immediately deletes
-   the GitHub Actions Artifact. A failed delete remains in cleanup status and
-   is retried on the next polling cycle without downloading the files again.
+4. The poller verifies the complete expected output set (EXE plus MSI for
+   Windows 64-bit, EXE for Windows 32-bit), writes a completion marker, and
+   then deletes every Artifact belonging to that workflow run. A failed
+   download or delete is retried without treating a partial local copy as
+   complete.
 
 The generator host therefore does not need a public callback address. Its
 fine-grained GitHub token needs repository permissions `Actions: read and
@@ -71,10 +73,12 @@ this layout:
 <ARTIFACT_ROOT>/<build-uuid>/<generated-file>
 ```
 
-Open `/artifacts` to list and download every saved client. Files are streamed
-from disk and are not automatically deleted. Protect the generator and
-artifact pages with reverse-proxy authentication.
+Open `/artifacts` to list and download every saved client. An authenticated
+administrative integration can call `DELETE /delete_artifact_build?uuid=...`
+to remove one build directory. Protect generator, download, and deletion
+endpoints with reverse-proxy authentication.
 
 Set `GITHUB_POLL_INTERVAL` to control polling frequency in seconds (default
 `60`, minimum effective interval `10`). The integrated S6 image runs this
-poller automatically.
+poller automatically. `GITHUB_BUILD_TIMEOUT` limits how long an unfinished
+build is polled (default `21600` seconds).

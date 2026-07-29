@@ -38,6 +38,10 @@ RUSTDESK_PUBLIC_KEY_FILE = os.environ.get("RUSTDESK_PUBLIC_KEY_FILE", '')
 UPLOAD_TOKEN = os.environ.get("UPLOAD_TOKEN", '')
 ARTIFACT_ROOT = Path(os.environ.get("ARTIFACT_ROOT", BASE_DIR / 'exe'))
 GITHUB_POLL_INTERVAL = int(os.environ.get("GITHUB_POLL_INTERVAL", "60"))
+GITHUB_BUILD_TIMEOUT = max(
+    600,
+    int(os.environ.get("GITHUB_BUILD_TIMEOUT", "21600")),
+)
 SH_SECRET = os.environ.get('SH_SECRET', '')
 DEFAULT_PERMANENT_PASSWORD = os.environ.get('DEFAULT_PERMANENT_PASSWORD', '')
 

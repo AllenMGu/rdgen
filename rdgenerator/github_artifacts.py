@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import secrets
@@ -11,6 +12,7 @@ from django.conf import settings
 
 SUPPORTED_OUTPUTS = {".exe", ".msi"}
 SAFE_OUTPUT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+COMPLETION_MARKER = ".complete.json"
 TERMINAL_FAILURES = {
     "action_required",
     "cancelled",
@@ -47,13 +49,34 @@ def _valid_output_name(value):
     )
 
 
-def _has_downloaded_outputs(build_id):
-    directory = Path(settings.ARTIFACT_ROOT) / str(build_id)
-    return directory.is_dir() and any(
-        path.is_file()
-        and not path.is_symlink()
-        and _valid_output_name(path.name)
-        for path in directory.iterdir()
+def _expected_output_names(github_run):
+    filename = str(github_run.filename or "").strip()
+    exe_name = f"{filename}.exe"
+    if not _valid_output_name(exe_name):
+        raise ValueError("Build record contains an invalid output filename")
+    expected = {exe_name}
+    if github_run.platform == "windows":
+        expected.add(f"{filename}.msi")
+    return expected
+
+
+def _has_downloaded_outputs(github_run):
+    directory = Path(settings.ARTIFACT_ROOT) / str(github_run.uuid)
+    marker = directory / COMPLETION_MARKER
+    if not marker.is_file() or marker.is_symlink():
+        return False
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    names = payload.get("files")
+    if not isinstance(names, list) or set(names) != _expected_output_names(github_run):
+        return False
+    return all(
+        (directory / name).is_file()
+        and not (directory / name).is_symlink()
+        and _valid_output_name(name)
+        for name in names
     )
 
 
@@ -64,7 +87,10 @@ def _request_json(path):
         timeout=30,
     )
     response.raise_for_status()
-    return response.json()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("GitHub returned an invalid JSON response")
+    return payload
 
 
 def _delete_artifact(artifact_id):
@@ -79,7 +105,16 @@ def _delete_artifact(artifact_id):
         response.raise_for_status()
 
 
-def _download_artifact(archive_url, build_id):
+def _delete_run_artifacts(artifacts):
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            raise ValueError("GitHub returned an invalid artifact record")
+        artifact_id = artifact.get("id")
+        if artifact_id:
+            _delete_artifact(artifact_id)
+
+
+def _download_artifact(archive_url, github_run):
     response = requests.get(
         archive_url,
         headers=_headers(),
@@ -90,10 +125,11 @@ def _download_artifact(archive_url, build_id):
 
     artifact_root = Path(settings.ARTIFACT_ROOT)
     artifact_root.mkdir(parents=True, exist_ok=True)
-    destination = artifact_root / str(build_id)
+    destination = artifact_root / str(github_run.uuid)
     token = secrets.token_hex(8)
-    staging = artifact_root / f".{build_id}.{token}.download"
-    archive_path = artifact_root / f".{build_id}.{token}.zip"
+    staging = artifact_root / f".{github_run.uuid}.{token}.download"
+    archive_path = artifact_root / f".{github_run.uuid}.{token}.zip"
+    marker_temp = destination / f"{COMPLETION_MARKER}.{token}.tmp"
     staging.mkdir()
     try:
         with archive_path.open("wb") as target:
@@ -101,32 +137,46 @@ def _download_artifact(archive_url, build_id):
                 if chunk:
                     target.write(chunk)
 
-        saved = []
+        saved = set()
         with zipfile.ZipFile(archive_path) as archive:
             for member in archive.infolist():
                 name = Path(member.filename).name
                 if member.is_dir() or not _valid_output_name(name):
                     continue
+                if name in saved:
+                    raise ValueError(f"GitHub artifact contains duplicate output {name}")
                 output = staging / name
                 with archive.open(member) as source, output.open("wb") as target:
                     while chunk := source.read(1024 * 1024):
                         target.write(chunk)
-                saved.append(name)
-        if not saved:
-            raise ValueError("GitHub artifact did not contain an EXE or MSI")
+                saved.add(name)
+
+        expected = _expected_output_names(github_run)
+        missing = expected - saved
+        if missing:
+            raise ValueError(
+                "GitHub artifact is incomplete; missing " + ", ".join(sorted(missing))
+            )
+
         destination.mkdir(parents=True, exist_ok=True)
-        for name in saved:
+        for name in expected:
             os.replace(staging / name, destination / name)
-        return saved
+        marker_temp.write_text(
+            json.dumps({"files": sorted(expected)}, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(marker_temp, destination / COMPLETION_MARKER)
+        return sorted(expected)
     finally:
         archive_path.unlink(missing_ok=True)
+        marker_temp.unlink(missing_ok=True)
         shutil.rmtree(staging, ignore_errors=True)
 
 
 def sync_github_run(github_run):
     if not github_run.github_run_id:
         return False
-    outputs_downloaded = _has_downloaded_outputs(github_run.uuid)
+    outputs_downloaded = _has_downloaded_outputs(github_run)
 
     if not outputs_downloaded:
         run = _request_json(f"/actions/runs/{github_run.github_run_id}")
@@ -147,10 +197,13 @@ def sync_github_run(github_run):
         f"/actions/runs/{github_run.github_run_id}/artifacts?per_page=100"
     )
     expected_name = f"rdgen-{github_run.uuid}"
+    artifacts = payload.get("artifacts", [])
+    if not isinstance(artifacts, list):
+        raise ValueError("GitHub returned an invalid artifact list")
     artifact = next(
         (
             item
-            for item in payload.get("artifacts", [])
+            for item in artifacts
             if item.get("name") == expected_name and not item.get("expired")
         ),
         None,
@@ -159,7 +212,7 @@ def sync_github_run(github_run):
         if artifact:
             github_run.status = "deleting_artifact"
             github_run.save(update_fields=["status"])
-            _delete_artifact(artifact.get("id"))
+        _delete_run_artifacts(artifacts)
         github_run.status = "success"
         github_run.save(update_fields=["status"])
         return True
@@ -172,10 +225,13 @@ def sync_github_run(github_run):
 
     github_run.status = "downloading_artifacts"
     github_run.save(update_fields=["status"])
-    _download_artifact(artifact["archive_download_url"], github_run.uuid)
+    archive_url = artifact.get("archive_download_url")
+    if not isinstance(archive_url, str) or not archive_url:
+        raise ValueError("GitHub artifact has no download URL")
+    _download_artifact(archive_url, github_run)
     github_run.status = "deleting_artifact"
     github_run.save(update_fields=["status"])
-    _delete_artifact(artifact.get("id"))
+    _delete_run_artifacts(artifacts)
     github_run.status = "success"
     github_run.save(update_fields=["status"])
     return True
