@@ -23,6 +23,10 @@ ANDROID_APP_ID = RegexValidator(
     r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$",
     "Enter a valid Android application ID.",
 )
+WORKFLOW_UNSAFE_URL = RegexValidator(
+    r"^[^\x00-\x20\"'`$\\|<>]+$",
+    "URL contains characters that are unsafe in the build workflow.",
+)
 
 
 RUSTDESK_VERSIONS = [
@@ -77,12 +81,12 @@ class GenerateForm(forms.Form):
 
     #Custom Server
     serverIP = forms.CharField(label="Host", required=False, validators=[SAFE_HOST])
-    apiServer = forms.URLField(label="API Server", required=False)
+    apiServer = forms.URLField(label="API Server", required=False, max_length=2048, validators=[WORKFLOW_UNSAFE_URL])
     key = forms.CharField(label="Key", required=False, validators=[BASE64_PUBLIC_KEY])
     RS_PUB_KEY = forms.CharField(label="Key (JSON alias)", required=False, validators=[BASE64_PUBLIC_KEY])
-    urlLink = forms.URLField(label="Custom URL for links", required=False)
-    downloadLink = forms.URLField(label="Custom URL for downloading new versions", required=False)
-    updateLink = forms.URLField(label="Custom update URL", required=False)
+    urlLink = forms.URLField(label="Custom URL for links", required=False, max_length=2048, validators=[WORKFLOW_UNSAFE_URL])
+    downloadLink = forms.URLField(label="Custom URL for downloading new versions", required=False, max_length=2048, validators=[WORKFLOW_UNSAFE_URL])
+    updateLink = forms.URLField(label="Custom update URL", required=False, max_length=2048, validators=[WORKFLOW_UNSAFE_URL])
     compname = forms.CharField(label="Company name", required=False, validators=[SAFE_COMPANY])
 
     #Visual
