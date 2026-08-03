@@ -1,4 +1,5 @@
 import io
+from functools import wraps
 from pathlib import Path
 import binascii
 import logging
@@ -135,6 +136,26 @@ def _authorized_upload(request):
     )
 
 
+def _authorized_internal(request):
+    expected = _settings.RDGEN_INTERNAL_TOKEN
+    supplied = request.headers.get("X-RDGEN-Token", "")
+    return bool(
+        expected
+        and supplied
+        and secrets.compare_digest(expected, supplied)
+    )
+
+
+def _require_internal_if_configured(view):
+    @wraps(view)
+    def wrapped(request, *args, **kwargs):
+        if _settings.RDGEN_INTERNAL_TOKEN and not _authorized_internal(request):
+            return JsonResponse({"error": "Invalid internal token"}, status=403)
+        return view(request, *args, **kwargs)
+
+    return wrapped
+
+
 def _public_generator_url(request):
     configured_url = _settings.GENURL.strip().rstrip("/")
     if configured_url:
@@ -237,6 +258,7 @@ def _apply_default_permanent_password(cleaned_data):
     return cleaned_data
 
 
+@_require_internal_if_configured
 def generator_view(request):
     if request.method == 'POST':
         form, is_json = _generator_form(request)
@@ -499,6 +521,7 @@ def generator_view(request):
         form = GenerateForm()
     return render(request, 'generator.html', {'form': form})
 
+@_require_internal_if_configured
 def check_for_file(request):
     filename = request.GET.get('filename')
     uuid = request.GET.get('uuid')
@@ -556,6 +579,7 @@ def check_for_file(request):
             'log_url': github_log_url
         })
 
+@_require_internal_if_configured
 def download(request):
     build_id = _normalize_build_id(request.GET.get('uuid'))
     filename = _safe_artifact_name(request.GET.get('filename'))
@@ -576,8 +600,13 @@ def download(request):
     )
 
 
+@_require_internal_if_configured
 def artifacts(request):
     requested_build = request.GET.get("build")
+    if not requested_build and not (
+        _authorized_internal(request) or _authorized_upload(request)
+    ):
+        return JsonResponse({"error": "Authentication required"}, status=401)
     if requested_build:
         build_ids = [_normalize_build_id(requested_build)]
         if not build_ids[0]:
@@ -614,6 +643,8 @@ def artifacts(request):
 def delete_artifact_build(request):
     if request.method != "DELETE":
         return HttpResponseNotAllowed(["DELETE"])
+    if not (_authorized_internal(request) or _authorized_upload(request)):
+        return JsonResponse({"error": "Authentication required"}, status=401)
     build_id = _normalize_build_id(request.GET.get("uuid"))
     if not build_id:
         return JsonResponse({"error": "Invalid build ID"}, status=400)
@@ -624,6 +655,7 @@ def delete_artifact_build(request):
     return HttpResponse(status=204)
 
 
+@_require_internal_if_configured
 def get_png(request):
     build_id = _normalize_build_id(request.GET.get("uuid"))
     filename = request.GET.get("filename")
