@@ -17,11 +17,13 @@ services:
       RUSTDESK_REF: ${RUSTDESK_REF:-}
       RUSTDESK_PUBLIC_KEY_FILE: ${RUSTDESK_PUBLIC_KEY_FILE:-}
       UPLOAD_TOKEN: ${UPLOAD_TOKEN:-}
+      RDGEN_INTERNAL_TOKEN: ${RDGEN_INTERNAL_TOKEN:-}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}
       ARTIFACT_ROOT: /opt/rdgen/exe
       GITHUB_POLL_INTERVAL: ${GITHUB_POLL_INTERVAL:-60}
       SH_SECRET: ${SH_SECRET:-}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     dns:
       - 8.8.8.8
     volumes:
