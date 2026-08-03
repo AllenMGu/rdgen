@@ -44,6 +44,7 @@ GITHUB_BUILD_TIMEOUT = max(
 )
 SH_SECRET = os.environ.get('SH_SECRET', '')
 DEFAULT_PERMANENT_PASSWORD = os.environ.get('DEFAULT_PERMANENT_PASSWORD', '')
+RDGEN_INTERNAL_TOKEN = os.environ.get('RDGEN_INTERNAL_TOKEN', '')
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
@@ -53,7 +54,14 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 DEBUG_ENV = os.environ.get("DEBUG", "False")
 DEBUG = DEBUG_ENV.lower() in ['true', '1', 't']
 
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.environ.get(
+        "ALLOWED_HOSTS",
+        "localhost,127.0.0.1,[::1]",
+    ).split(",")
+    if host.strip()
+]
 #CSRF_TRUSTED_ORIGINS = os.getenv('CSRF_TRUSTED_ORIGINS', '').split()
 
 # Application definition
@@ -151,4 +159,9 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-DATA_UPLOAD_MAX_MEMORY_SIZE = None
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(
+    os.environ.get("DATA_UPLOAD_MAX_MEMORY_SIZE", str(10 * 1024 * 1024))
+)
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(
+    os.environ.get("FILE_UPLOAD_MAX_MEMORY_SIZE", str(5 * 1024 * 1024))
+)
