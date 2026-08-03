@@ -173,6 +173,31 @@ class GenerateFormTests(SimpleTestCase):
         )
         self.assertEqual("request-example", cleaned_data["permanentPassword"])
 
+    def test_rejects_urls_that_can_inject_workflow_commands(self):
+        base = {
+            "platform": "windows",
+            "version": "1.4.9",
+            "exename": "example",
+            "appname": "ExampleDesk",
+            "direction": "both",
+            "installation": "installationY",
+            "settings": "settingsN",
+            "serverIP": "rustdesk.example.com",
+            "RS_PUB_KEY": "QUJDRA==",
+            "theme": "system",
+            "themeDorO": "default",
+            "passApproveMode": "password-click",
+            "permissionsType": "custom",
+            "image_quality": "balanced",
+        }
+        for field in ("apiServer", "urlLink", "downloadLink", "updateLink"):
+            form = GenerateForm({
+                **base,
+                field: "https://example.com/$(whoami)",
+            })
+            self.assertFalse(form.is_valid())
+            self.assertIn(field, form.errors)
+
 
 class CustomConfigTests(SimpleTestCase):
     def test_maps_requested_options_to_rustdesk_schema(self):
@@ -309,15 +334,51 @@ class ArtifactStorageTests(SimpleTestCase):
     def test_admin_can_delete_a_saved_build_directory(self):
         with TemporaryDirectory() as artifact_root, override_settings(
             ARTIFACT_ROOT=Path(artifact_root),
+            RDGEN_INTERNAL_TOKEN="test-internal-token",
         ):
             directory = Path(artifact_root) / self.build_id
             directory.mkdir()
             (directory / "client.exe").write_bytes(b"binary")
             response = self.client.delete(
-                f"/delete_artifact_build?uuid={self.build_id}"
+                f"/delete_artifact_build?uuid={self.build_id}",
+                HTTP_X_RDGEN_TOKEN="test-internal-token",
             )
             self.assertEqual(204, response.status_code)
             self.assertFalse(directory.exists())
+
+    def test_rejects_unauthorized_artifact_deletion(self):
+        with TemporaryDirectory() as artifact_root, override_settings(
+            ARTIFACT_ROOT=Path(artifact_root),
+            RDGEN_INTERNAL_TOKEN="test-internal-token",
+        ):
+            directory = Path(artifact_root) / self.build_id
+            directory.mkdir()
+            response = self.client.delete(
+                f"/delete_artifact_build?uuid={self.build_id}"
+            )
+            self.assertEqual(401, response.status_code)
+            self.assertTrue(directory.exists())
+
+    def test_internal_token_protects_artifact_downloads(self):
+        with TemporaryDirectory() as artifact_root, override_settings(
+            ARTIFACT_ROOT=Path(artifact_root),
+            RDGEN_INTERNAL_TOKEN="test-internal-token",
+        ):
+            directory = Path(artifact_root) / self.build_id
+            directory.mkdir()
+            (directory / "client.exe").write_bytes(b"binary")
+
+            denied = self.client.get(
+                f"/download?uuid={self.build_id}&filename=client.exe"
+            )
+            self.assertEqual(403, denied.status_code)
+
+            allowed = self.client.get(
+                f"/download?uuid={self.build_id}&filename=client.exe",
+                HTTP_X_RDGEN_TOKEN="test-internal-token",
+            )
+            self.assertEqual(200, allowed.status_code)
+            self.assertEqual(b"binary", b"".join(allowed.streaming_content))
 
 
 class GitHubInputBlobTests(SimpleTestCase):
